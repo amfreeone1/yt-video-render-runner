@@ -94,3 +94,50 @@ def render_jobs(job: RenderJob):
             "received_at": payload["received_at"],
         },
     )
+
+
+def load_job_file(file_path: Path) -> dict:
+    return json.loads(file_path.read_text(encoding="utf-8"))
+
+
+def find_job_by_render_key(render_job_key: str) -> dict | None:
+    search_order = [
+        ("queued", QUEUED_DIR),
+        ("processing", PROCESSING_DIR),
+        ("done", DONE_DIR),
+        ("failed", FAILED_DIR),
+    ]
+
+    for dir_status, dir_path in search_order:
+        for file_path in sorted(dir_path.glob("*.json"), reverse=True):
+            payload = load_job_file(file_path)
+            if payload.get("render_job_key") == render_job_key:
+                payload["job_state_dir"] = dir_status
+                if not payload.get("status"):
+                    payload["status"] = dir_status
+                return payload
+
+    return None
+
+
+@app.get("/render-jobs/{render_job_key}")
+def get_render_job(render_job_key: str):
+    payload = find_job_by_render_key(render_job_key)
+
+    if not payload:
+        raise HTTPException(status_code=404, detail="render job not found")
+
+    return {
+        "found": True,
+        "render_job_key": render_job_key,
+        "job_id": payload.get("job_id", ""),
+        "status": payload.get("status", ""),
+        "job_state_dir": payload.get("job_state_dir", ""),
+        "source_row_number": payload.get("source_row_number"),
+        "content_id": payload.get("content_id", ""),
+        "video_url": payload.get("video_url", ""),
+        "output_file": payload.get("output_file", ""),
+        "error_message": payload.get("error_message", ""),
+        "received_at": payload.get("received_at", ""),
+        "updated_at": payload.get("updated_at", payload.get("received_at", "")),
+    }
