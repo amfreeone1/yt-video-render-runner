@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from pydantic import BaseModel
 from pathlib import Path
 from datetime import datetime, timezone
@@ -15,13 +15,18 @@ QUEUED_DIR = JOBS_DIR / "queued"
 PROCESSING_DIR = JOBS_DIR / "processing"
 DONE_DIR = JOBS_DIR / "done"
 FAILED_DIR = JOBS_DIR / "failed"
+OUTPUTS_DIR = BASE_DIR / "outputs"
 
-for d in [QUEUED_DIR, PROCESSING_DIR, DONE_DIR, FAILED_DIR]:
+for d in [QUEUED_DIR, PROCESSING_DIR, DONE_DIR, FAILED_DIR, OUTPUTS_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def build_artifact_endpoint(render_job_key: str) -> str:
+    return f"/render-jobs/{render_job_key}/artifact"
 
 
 class RenderJob(BaseModel):
@@ -120,12 +125,37 @@ def find_job_by_render_key(render_job_key: str) -> dict | None:
     return None
 
 
+@app.get("/render-jobs/{render_job_key}/artifact")
+def get_render_artifact(render_job_key: str):
+    payload = find_job_by_render_key(render_job_key)
+
+    if not payload:
+        raise HTTPException(status_code=404, detail="render job not found")
+
+    output_file = payload.get("output_file", "")
+    if not output_file:
+        raise HTTPException(status_code=404, detail="output file missing")
+
+    file_path = OUTPUTS_DIR / output_file
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="artifact not found")
+
+    return FileResponse(
+        path=str(file_path),
+        media_type="video/mp4",
+        filename=output_file,
+    )
+
+
 @app.get("/render-jobs/{render_job_key}")
 def get_render_job(render_job_key: str):
     payload = find_job_by_render_key(render_job_key)
 
     if not payload:
         raise HTTPException(status_code=404, detail="render job not found")
+
+    output_file = payload.get("output_file", "")
+    artifact_file_exists = bool(output_file) and (OUTPUTS_DIR / output_file).exists()
 
     return {
         "found": True,
@@ -136,7 +166,9 @@ def get_render_job(render_job_key: str):
         "source_row_number": payload.get("source_row_number"),
         "content_id": payload.get("content_id", ""),
         "video_url": payload.get("video_url", ""),
-        "output_file": payload.get("output_file", ""),
+        "output_file": output_file,
+        "artifact_ready": artifact_file_exists,
+        "artifact_endpoint": build_artifact_endpoint(render_job_key) if artifact_file_exists else "",
         "error_message": payload.get("error_message", ""),
         "received_at": payload.get("received_at", ""),
         "updated_at": payload.get("updated_at", payload.get("received_at", "")),
@@ -174,9 +206,17 @@ def mark_render_job_complete(render_job_key: str):
     }
     from_dir = dir_map.get(current_dir_name, QUEUED_DIR)
 
+    output_file = payload.get("render_output_name", f"{render_job_key}.mp4")
+    file_path = OUTPUTS_DIR / output_file
+
+    if not file_path.exists():
+        raise HTTPException(status_code=409, detail="artifact not ready")
+
     payload["status"] = "completed"
-    payload["video_url"] = f"https://drive.google.com/file/d/mock-{render_job_key}/view"
-    payload["output_file"] = payload.get("render_output_name", f"{render_job_key}.mp4")
+    payload["video_url"] = ""
+    payload["output_file"] = output_file
+    payload["artifact_ready"] = True
+    payload["artifact_endpoint"] = build_artifact_endpoint(render_job_key)
     payload["error_message"] = ""
 
     move_job_between_dirs(payload, from_dir, DONE_DIR)
@@ -188,6 +228,8 @@ def mark_render_job_complete(render_job_key: str):
         "status": payload["status"],
         "video_url": payload["video_url"],
         "output_file": payload["output_file"],
+        "artifact_ready": payload["artifact_ready"],
+        "artifact_endpoint": payload["artifact_endpoint"],
         "updated_at": payload["updated_at"],
     }
 
