@@ -3,7 +3,15 @@ from fastapi.responses import JSONResponse, FileResponse
 from pydantic import BaseModel
 from pathlib import Path
 from datetime import datetime, timezone
-import json, uuid, shutil, logging, subprocess, threading, urllib.request
+import json
+import uuid
+import shutil
+import logging
+import re
+import subprocess
+import threading
+import urllib.request
+import urllib.parse
 
 app = FastAPI()
 log = logging.getLogger("uvicorn.error")
@@ -14,138 +22,321 @@ Q = JOBS / "queued"
 P = JOBS / "processing"
 D = JOBS / "done"
 F = JOBS / "failed"
+OUT = BASE / "outputs"
+AUD = BASE / "audio"
 
-for d in [Q, P, D, F]:
+for d in [Q, P, D, F, OUT, AUD]:
     d.mkdir(parents=True, exist_ok=True)
 
-# ---------------- REQUEST MODEL ----------------
+
 class RenderRequest(BaseModel):
     render_job_key: str
     audio_url: str
     content_id: str
     source_row_number: int
 
-# ---------------- HELPERS ----------------
-def now():
+
+def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
-def job_path(folder, key):
+
+def artifact_endpoint(key: str) -> str:
+    return f"/render-jobs/{key}/artifact"
+
+
+def job_path(folder: Path, key: str) -> Path:
     return folder / f"{key}.json"
 
-def save_job(folder, key, data):
-    with open(job_path(folder, key), "w") as f:
-        json.dump(data, f, indent=2)
 
-def load_job(folder, key):
+def save_job(folder: Path, key: str, data: dict):
+    job_path(folder, key).write_text(
+        json.dumps(data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def load_job(folder: Path, key: str):
     path = job_path(folder, key)
     if not path.exists():
         return None
-    with open(path) as f:
-        return json.load(f)
+    return json.loads(path.read_text(encoding="utf-8"))
 
-def move_job(src, dst, key):
-    shutil.move(job_path(src, key), job_path(dst, key))
 
-# ---------------- DOWNLOAD ----------------
-def download_file(url, dest):
-    urllib.request.urlretrieve(url, dest)
+def delete_job(folder: Path, key: str):
+    path = job_path(folder, key)
+    if path.exists():
+        path.unlink()
 
-# ---------------- RENDER WORKER ----------------
-def process_job(job):
-    key = job["render_job_key"]
+
+def move_job(src: Path, dst: Path, key: str, data: dict):
+    delete_job(src, key)
+    save_job(dst, key, data)
+
+
+def current_job(key: str):
+    for folder, state in [(Q, "queued"), (P, "processing"), (D, "done"), (F, "failed")]:
+        job = load_job(folder, key)
+        if job:
+            job["job_state_dir"] = state
+            return job
+    return None
+
+
+def build_audio_download_url(url: str) -> str:
+    m = re.search(r"/d/([A-Za-z0-9_-]+)", url or "")
+    if m:
+        return f"https://drive.google.com/uc?export=download&id={urllib.parse.quote(m.group(1))}"
+    return url
+
+
+def download_file(url: str, dest: Path):
+    req = urllib.request.Request(
+        build_audio_download_url(url),
+        headers={"User-Agent": "Mozilla/5.0"},
+    )
+    with urllib.request.urlopen(req, timeout=180) as r, dest.open("wb") as f:
+        shutil.copyfileobj(r, f)
+
+
+def process_job(key: str):
+    job = load_job(P, key)
+    if not job:
+        return
 
     try:
-        audio_file = P / f"{key}.mp3"
-        output_file = P / f"{key}.mp4"
+        audio_file = AUD / f"{key}.mp3"
+        output_file = OUT / f"{key}.mp4"
 
-        # download audio
+        job["status"] = "processing"
+        job["job_state_dir"] = "processing"
+        job["updated_at"] = now()
+        save_job(P, key, job)
+
+        log.info("JOB %s audio download start", key)
         download_file(job["audio_url"], audio_file)
+        log.info(
+            "JOB %s audio download complete bytes=%s",
+            key,
+            audio_file.stat().st_size if audio_file.exists() else 0,
+        )
 
-        # FFmpeg render (simple black video + audio)
         cmd = [
             "ffmpeg",
             "-y",
-            "-f", "lavfi",
-            "-i", "color=c=black:s=1280x720:d=10",
-            "-i", str(audio_file),
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=1080x1920:r=30",
+            "-i",
+            str(audio_file),
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
             "-shortest",
-            "-c:v", "libx264",
-            "-c:a", "aac",
-            str(output_file)
+            str(output_file),
         ]
-
-        subprocess.run(cmd, check=True)
+        log.info("JOB %s ffmpeg start output=%s", key, output_file.name)
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or "ffmpeg failed")
+        if not output_file.exists() or output_file.stat().st_size == 0:
+            raise RuntimeError("output artifact missing")
+        log.info("JOB %s ffmpeg complete bytes=%s", key, output_file.stat().st_size)
 
         job["status"] = "completed"
-        job["video_url"] = f"/render-jobs/{key}/video"
-        job["output_file"] = f"{key}.mp4"
+        job["job_state_dir"] = "done"
+        job["video_url"] = ""
+        job["output_file"] = output_file.name
         job["artifact_ready"] = True
+        job["artifact_endpoint"] = artifact_endpoint(key)
+        job["error_message"] = ""
         job["updated_at"] = now()
-
+        delete_job(P, key)
         save_job(D, key, job)
+        log.info("JOB %s completed", key)
 
     except Exception as e:
+        log.exception("JOB %s processing failed", key)
+        job = load_job(P, key) or job
         job["status"] = "failed"
+        job["job_state_dir"] = "failed"
+        job["video_url"] = ""
+        job["output_file"] = ""
+        job["artifact_ready"] = False
+        job["artifact_endpoint"] = ""
         job["error_message"] = str(e)
         job["updated_at"] = now()
+        delete_job(P, key)
         save_job(F, key, job)
 
-# ---------------- BACKGROUND LOOP ----------------
+
 def worker_loop():
     while True:
-        for file in Q.glob("*.json"):
-            key = file.stem
-            job = load_job(Q, key)
+        try:
+            for file in list(Q.glob("*.json")):
+                key = file.stem
+                job = load_job(Q, key)
+                if not job:
+                    continue
 
-            if not job:
-                continue
+                job["status"] = "processing"
+                job["job_state_dir"] = "processing"
+                job["updated_at"] = now()
+                move_job(Q, P, key, job)
+                log.info("JOB %s accepted for background processing", key)
+                threading.Thread(target=process_job, args=(key,), daemon=True).start()
 
-            move_job(Q, P, key)
-            save_job(P, key, job)
-
-            threading.Thread(target=process_job, args=(job,)).start()
+        except Exception:
+            log.exception("worker loop error")
 
         import time
         time.sleep(5)
 
+
 threading.Thread(target=worker_loop, daemon=True).start()
 
-# ---------------- API ----------------
+
+@app.get("/health")
+def health():
+    return {
+        "ok": True,
+        "service": "yt-video-render-runner",
+        "ffmpeg_ready": shutil.which("ffmpeg") is not None,
+        "time": now(),
+    }
+
 
 @app.post("/render-jobs")
 def submit_job(req: RenderRequest):
     job = {
         "found": True,
         "render_job_key": req.render_job_key,
-        "job_id": f"job_{uuid.uuid4().hex[:8]}",
+        "job_id": f"job_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}",
         "status": "queued",
         "job_state_dir": "queued",
         "source_row_number": req.source_row_number,
         "content_id": req.content_id,
+        "audio_url": req.audio_url,
         "video_url": "",
         "output_file": "",
         "artifact_ready": False,
+        "artifact_endpoint": "",
         "error_message": "",
         "received_at": now(),
-        "updated_at": now()
+        "updated_at": now(),
     }
-
     save_job(Q, req.render_job_key, job)
-    return job
+    log.info("JOB %s submitted", req.render_job_key)
+    return JSONResponse(status_code=202, content=job)
+
 
 @app.get("/render-jobs/{key}")
 def get_job(key: str):
-    for folder, state in [(Q,"queued"), (P,"processing"), (D,"completed"), (F,"failed")]:
-        job = load_job(folder, key)
-        if job:
-            job["job_state_dir"] = state
-            return job
+    job = current_job(key)
+    if not job:
+        return JSONResponse(status_code=404, content={"detail": "render job not found"})
 
-    return JSONResponse(status_code=404, content={"detail": "render job not found"})
+    output_file = job.get("output_file", "")
+    artifact_ready = bool(output_file) and (OUT / output_file).exists()
+    return {
+        "found": True,
+        "render_job_key": key,
+        "job_id": job.get("job_id", ""),
+        "status": job.get("status", ""),
+        "job_state_dir": job.get("job_state_dir", ""),
+        "source_row_number": job.get("source_row_number"),
+        "content_id": job.get("content_id", ""),
+        "video_url": job.get("video_url", ""),
+        "output_file": output_file,
+        "artifact_ready": artifact_ready,
+        "artifact_endpoint": artifact_endpoint(key) if artifact_ready else "",
+        "error_message": job.get("error_message", ""),
+        "received_at": job.get("received_at", ""),
+        "updated_at": job.get("updated_at", job.get("received_at", "")),
+    }
+
+
+@app.get("/render-jobs/{key}/artifact")
+def get_artifact(key: str):
+    job = load_job(D, key)
+    if not job:
+        raise HTTPException(status_code=404, detail="render job not found")
+
+    output_file = job.get("output_file", "")
+    if not output_file:
+        raise HTTPException(status_code=404, detail="output file missing")
+
+    path = OUT / output_file
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="artifact not found")
+
+    return FileResponse(path, media_type="video/mp4", filename=output_file)
+
 
 @app.get("/render-jobs/{key}/video")
 def get_video(key: str):
-    video = D / f"{key}.mp4"
-    if not video.exists():
-        raise HTTPException(status_code=404, detail="Video not ready")
-    return FileResponse(video, media_type="video/mp4")
+    return get_artifact(key)
+
+
+@app.post("/render-jobs/{key}/mark-failed")
+def mark_failed(key: str):
+    job = current_job(key)
+    if not job:
+        raise HTTPException(status_code=404, detail="render job not found")
+
+    delete_job(Q, key)
+    delete_job(P, key)
+    delete_job(D, key)
+
+    job["status"] = "failed"
+    job["job_state_dir"] = "failed"
+    job["error_message"] = "manual terminal failure test"
+    job["updated_at"] = now()
+    save_job(F, key, job)
+
+    return {
+        "ok": True,
+        "render_job_key": key,
+        "status": "failed",
+        "updated_at": job["updated_at"],
+    }
+
+
+@app.post("/render-jobs/{key}/mark-complete")
+def mark_complete(key: str):
+    job = current_job(key)
+    if not job:
+        raise HTTPException(status_code=404, detail="render job not found")
+
+    output_file = OUT / f"{key}.mp4"
+    if not output_file.exists():
+        raise HTTPException(status_code=409, detail="artifact not ready")
+
+    delete_job(Q, key)
+    delete_job(P, key)
+    delete_job(F, key)
+
+    job["status"] = "completed"
+    job["job_state_dir"] = "done"
+    job["video_url"] = ""
+    job["output_file"] = output_file.name
+    job["artifact_ready"] = True
+    job["artifact_endpoint"] = artifact_endpoint(key)
+    job["error_message"] = ""
+    job["updated_at"] = now()
+    save_job(D, key, job)
+
+    return {
+        "ok": True,
+        "render_job_key": key,
+        "status": "completed",
+        "output_file": output_file.name,
+        "artifact_ready": True,
+        "artifact_endpoint": artifact_endpoint(key),
+        "updated_at": job["updated_at"],
+    }
