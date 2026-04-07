@@ -141,3 +141,85 @@ def get_render_job(render_job_key: str):
         "received_at": payload.get("received_at", ""),
         "updated_at": payload.get("updated_at", payload.get("received_at", "")),
     }
+
+
+def move_job_between_dirs(payload: dict, from_dir: Path, to_dir: Path):
+    job_id = payload.get("job_id")
+    if not job_id:
+        raise HTTPException(status_code=400, detail="job_id missing")
+
+    src = from_dir / f"{job_id}.json"
+    dst = to_dir / f"{job_id}.json"
+
+    if src.exists():
+        src.unlink()
+
+    payload["updated_at"] = now_iso()
+    dst.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+@app.post("/render-jobs/{render_job_key}/mark-complete")
+def mark_render_job_complete(render_job_key: str):
+    payload = find_job_by_render_key(render_job_key)
+
+    if not payload:
+        raise HTTPException(status_code=404, detail="render job not found")
+
+    current_dir_name = payload.get("job_state_dir", "queued")
+    dir_map = {
+        "queued": QUEUED_DIR,
+        "processing": PROCESSING_DIR,
+        "done": DONE_DIR,
+        "failed": FAILED_DIR,
+    }
+    from_dir = dir_map.get(current_dir_name, QUEUED_DIR)
+
+    payload["status"] = "completed"
+    payload["video_url"] = f"https://drive.google.com/file/d/mock-{render_job_key}/view"
+    payload["output_file"] = payload.get("render_output_name", f"{render_job_key}.mp4")
+    payload["error_message"] = ""
+
+    move_job_between_dirs(payload, from_dir, DONE_DIR)
+
+    return {
+        "ok": True,
+        "render_job_key": render_job_key,
+        "job_id": payload.get("job_id", ""),
+        "status": payload["status"],
+        "video_url": payload["video_url"],
+        "output_file": payload["output_file"],
+        "updated_at": payload["updated_at"],
+    }
+
+
+@app.post("/render-jobs/{render_job_key}/mark-failed")
+def mark_render_job_failed(render_job_key: str):
+    payload = find_job_by_render_key(render_job_key)
+
+    if not payload:
+        raise HTTPException(status_code=404, detail="render job not found")
+
+    current_dir_name = payload.get("job_state_dir", "queued")
+    dir_map = {
+        "queued": QUEUED_DIR,
+        "processing": PROCESSING_DIR,
+        "done": DONE_DIR,
+        "failed": FAILED_DIR,
+    }
+    from_dir = dir_map.get(current_dir_name, QUEUED_DIR)
+
+    payload["status"] = "failed"
+    payload["video_url"] = ""
+    payload["output_file"] = ""
+    payload["error_message"] = "manual terminal failure test"
+
+    move_job_between_dirs(payload, from_dir, FAILED_DIR)
+
+    return {
+        "ok": True,
+        "render_job_key": render_job_key,
+        "job_id": payload.get("job_id", ""),
+        "status": payload["status"],
+        "error_message": payload["error_message"],
+        "updated_at": payload["updated_at"],
+    }
