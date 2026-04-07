@@ -1,0 +1,23 @@
+name: Render Deploy Hook
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: Why you are triggering a deploy
+        required: false
+        default: manual_redeploy
+
+jobs:
+  trigger-render-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call Render deploy hook
+        env:
+          RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+        run: |
+          if [ -z "$RENDER_DEPLOY_HOOK_URL" ]; then
+            echo "RENDER_DEPLOY_HOOK_URL secret is missing"
+            exit 1
+          fi
+          curl -fsS -X POST "$RENDER_DEPLOY_HOOK_URL"
