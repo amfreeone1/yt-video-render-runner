@@ -85,8 +85,44 @@ def current_job(key: str):
 def build_audio_download_url(url: str) -> str:
     m = re.search(r"/d/([A-Za-z0-9_-]+)", url or "")
     if m:
-        return f"https://drive.google.com/uc?export=download&id={urllib.parse.quote(m.group(1))}"
+        file_id = m.group(1)
+        return (
+            f"https://drive.google.com/uc?export=download"
+            f"&confirm=t&id={urllib.parse.quote(file_id)}"
+        )
     return url
+
+
+def validate_downloaded_audio(path: Path):
+    """Raise RuntimeError with structured error tag if download result is bad."""
+    if not path.exists():
+        raise RuntimeError("downloaded_audio_missing")
+
+    size = path.stat().st_size
+    if size < 1024:
+        raise RuntimeError(
+            f"downloaded_audio_too_small: {size} bytes"
+        )
+
+    with path.open("rb") as f:
+        head = f.read(512).lower()
+    if b"<html" in head or b"<!doctype" in head:
+        raise RuntimeError("downloaded_audio_is_html")
+
+    ffprobe = shutil.which("ffprobe")
+    if ffprobe:
+        probe_cmd = [
+            ffprobe, "-v", "error",
+            "-select_streams", "a:0",
+            "-show_entries", "stream=codec_type",
+            "-of", "csv=p=0",
+            str(path),
+        ]
+        probe = subprocess.run(probe_cmd, capture_output=True, text=True, check=False)
+        if probe.returncode != 0 or "audio" not in (probe.stdout or ""):
+            raise RuntimeError(
+                f"ffprobe_invalid_audio: {probe.stderr.strip()[:200]}"
+            )
 
 
 def download_file(url: str, dest: Path):
@@ -119,6 +155,9 @@ def process_job(key: str):
             key,
             audio_file.stat().st_size if audio_file.exists() else 0,
         )
+
+        validate_downloaded_audio(audio_file)
+        log.info("JOB %s audio validation passed", key)
 
         cmd = [
             "ffmpeg",
