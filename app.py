@@ -5,6 +5,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 import json
 import uuid
+import time
 import shutil
 import logging
 import re
@@ -12,6 +13,9 @@ import subprocess
 import threading
 import urllib.request
 import urllib.parse
+
+_INSTANCE_ID = uuid.uuid4().hex[:8]
+_BOOT_TIME = time.time()
 
 app = FastAPI()
 log = logging.getLogger("uvicorn.error")
@@ -27,6 +31,8 @@ AUD = BASE / "audio"
 
 for d in [Q, P, D, F, OUT, AUD]:
     d.mkdir(parents=True, exist_ok=True)
+
+log.info(f"Runner started instance_id={_INSTANCE_ID} active_jobs={len(list(Q.glob('*.json')) + list(P.glob('*.json')))}")
 
 
 class RenderRequest(BaseModel):
@@ -247,6 +253,9 @@ def health():
         "service": "yt-video-render-runner",
         "ffmpeg_ready": shutil.which("ffmpeg") is not None,
         "time": now(),
+        "instance_id": _INSTANCE_ID,
+        "uptime_seconds": int(time.time() - _BOOT_TIME),
+        "active_jobs": len(list(Q.glob("*.json")) + list(P.glob("*.json"))),
     }
 
 
@@ -378,4 +387,4 @@ def mark_complete(key: str):
         "artifact_ready": True,
         "artifact_endpoint": artifact_endpoint(key),
         "updated_at": job["updated_at"],
-    }
+        }
