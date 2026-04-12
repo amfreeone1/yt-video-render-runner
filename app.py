@@ -106,9 +106,7 @@ def validate_downloaded_audio(path: Path):
 
     size = path.stat().st_size
     if size < 1024:
-        raise RuntimeError(
-            f"downloaded_audio_too_small: {size} bytes"
-        )
+        raise RuntimeError("downloaded_audio_too_small")
 
     with path.open("rb") as f:
         head = f.read(512).lower()
@@ -126,9 +124,7 @@ def validate_downloaded_audio(path: Path):
         ]
         probe = subprocess.run(probe_cmd, capture_output=True, text=True, check=False)
         if probe.returncode != 0 or "audio" not in (probe.stdout or ""):
-            raise RuntimeError(
-                f"ffprobe_invalid_audio: {probe.stderr.strip()[:200]}"
-            )
+            raise RuntimeError("ffprobe_invalid_audio")
 
 
 def download_file(url: str, dest: Path):
@@ -188,9 +184,9 @@ def process_job(key: str):
         log.info("JOB %s ffmpeg start output=%s", key, output_file.name)
         result = subprocess.run(cmd, capture_output=True, text=True, check=False)
         if result.returncode != 0:
-            raise RuntimeError(result.stderr.strip() or "ffmpeg failed")
+            raise RuntimeError("ffmpeg_failed")
         if not output_file.exists() or output_file.stat().st_size == 0:
-            raise RuntimeError("output artifact missing")
+            raise RuntimeError("output_artifact_missing")
         log.info("JOB %s ffmpeg complete bytes=%s", key, output_file.stat().st_size)
 
         job["status"] = "completed"
