@@ -233,9 +233,9 @@ def process_job(key: str):
         log.info("JOB %s ffmpeg start output=%s", key, output_file.name)
         result = subprocess.run(cmd, capture_output=True, text=True, check=False)
         if result.returncode != 0:
-            raise RuntimeError("ffmpeg_failed")
+            raise RuntimeError(result.stderr.strip() or "ffmpeg failed")
         if not output_file.exists() or output_file.stat().st_size == 0:
-            raise RuntimeError("output_artifact_missing")
+            raise RuntimeError("output artifact missing")
         log.info("JOB %s ffmpeg complete bytes=%s", key, output_file.stat().st_size)
 
         job["status"] = "completed"
