@@ -646,7 +646,7 @@ def health():
         "time": now(),
         "instance_id": _INSTANCE_ID,
         "uptime_seconds": int(time.time() - _BOOT_TIME),
-        "active_jobs": len(list(Q.glob("*.json")) + list(P.glob("*.json"))),
+        "active_jobs": len(list(Q.glob('*.json')) + list(P.glob('*.json'))),
     }
 
 
@@ -810,12 +810,12 @@ def create_upload_job(
     existing = find_upload_job(body.upload_job_key)
     if existing:
         _, job = existing
-        return {
+        return JSONResponse(status_code=200, content={
             "upload_job_key": job["upload_job_key"],
             "status": ap_status(job["status"]),
             "poll_url": poll_url,
             "submitted_at": job["submitted_at"],
-        }
+        })
 
     quota_lock = read_quota_lock()
     now_dt = datetime.now(timezone.utc)
