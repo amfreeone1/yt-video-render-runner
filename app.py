@@ -1,6 +1,6 @@
 import os
 import sys
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header, Request
 from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
 from pydantic import BaseModel, Field
 from pathlib import Path
@@ -784,8 +784,9 @@ def mark_complete(key: str):
 @app.post("/upload-jobs", status_code=202)
 def create_upload_job(
     body: UploadJobRequest,
-    x_runner_auth: Optional[str] = None,
-    idempotency_key: Optional[str] = None,
+    request: Request,
+    x_runner_auth: Optional[str] = Header(None, alias="X-Runner-Auth"),
+    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
 ):
     check_runner_auth(x_runner_auth)
 
@@ -802,8 +803,9 @@ def create_upload_job(
     if not body.metadata.category_id:
         raise HTTPException(status_code=400, detail={"error_class": "VALIDATION", "error_message": "metadata.category_id is required"})
 
-    explicit_base = os.environ.get("RUNNER_BASE_URL", "https://yt-video-render-runner.onrender.com")
-    poll_url = f"{explicit_base.rstrip('/')}/upload-jobs/{body.upload_job_key}"
+    explicit_base = os.environ.get("RUNNER_BASE_URL")
+    base_url = explicit_base.rstrip("/") if explicit_base else f"{request.url.scheme}://{request.url.netloc}"
+    poll_url = f"{base_url}/upload-jobs/{body.upload_job_key}"
 
     existing = find_upload_job(body.upload_job_key)
     if existing:
@@ -872,7 +874,10 @@ def create_upload_job(
 
 
 @app.get("/upload-jobs/{upload_job_key}")
-def get_upload_job(upload_job_key: str, x_runner_auth: Optional[str] = None):
+def get_upload_job(
+    upload_job_key: str,
+    x_runner_auth: Optional[str] = Header(None, alias="X-Runner-Auth"),
+):
     check_runner_auth(x_runner_auth)
     safe_key_check(upload_job_key)
 
