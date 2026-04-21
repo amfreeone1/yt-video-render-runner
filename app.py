@@ -33,6 +33,51 @@ AUD = BASE / "audio"
 for d in [Q, P, D, F, OUT, AUD]:
     d.mkdir(parents=True, exist_ok=True)
 
+
+def _recover_orphaned_processing_jobs():
+    """
+    Boot-time recovery: any job left in processing/ from a previous
+    instance is orphaned (the thread that owned it is dead). Move it
+    back to queued/ so the worker_loop will re-pick it up.
+
+    Idempotent: safe to run on every boot. Never touches done/ or failed/.
+    """
+    recovered = 0
+    for file in list(P.glob("*.json")):
+        key = file.stem
+        try:
+            raw = file.read_text(encoding="utf-8")
+            job = json.loads(raw)
+        except Exception:
+            # Corrupt job file — leave it in processing/ for manual inspection
+            # rather than silently discarding it. Do NOT move to failed/:
+            # that would mutate a row's terminal state without proof.
+            log.exception("RECOVERY skipped corrupt job file %s", file.name)
+            continue
+
+        job["status"] = "queued"
+        job["job_state_dir"] = "queued"
+        job["updated_at"] = datetime.now(timezone.utc).isoformat()
+        # Preserve: render_job_key, source_row_number, content_id, audio_url,
+        # received_at, job_id. These are the canonical identity fields.
+
+        # Write to queued/ FIRST, then delete from processing/. If we crash
+        # between these two steps, we get a duplicate in queued/ (safe:
+        # worker_loop will re-pick it) rather than losing the job.
+        (Q / file.name).write_text(
+            json.dumps(job, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        file.unlink()
+        recovered += 1
+        log.info("RECOVERY moved orphan %s processing -> queued", key)
+
+    if recovered:
+        log.info("RECOVERY complete recovered=%d", recovered)
+
+
+_recover_orphaned_processing_jobs()
+
 log.info(f"Runner started instance_id={_INSTANCE_ID} active_jobs={len(list(Q.glob('*.json')) + list(P.glob('*.json')))}")
 
 
@@ -107,7 +152,9 @@ def validate_downloaded_audio(path: Path):
 
     size = path.stat().st_size
     if size < 1024:
-        raise RuntimeError("downloaded_audio_too_small")
+        raise RuntimeError(
+            f"downloaded_audio_too_small: {size} bytes"
+        )
 
     with path.open("rb") as f:
         head = f.read(512).lower()
@@ -125,7 +172,9 @@ def validate_downloaded_audio(path: Path):
         ]
         probe = subprocess.run(probe_cmd, capture_output=True, text=True, check=False)
         if probe.returncode != 0 or "audio" not in (probe.stdout or ""):
-            raise RuntimeError("ffprobe_invalid_audio")
+            raise RuntimeError(
+                f"ffprobe_invalid_audio: {probe.stderr.strip()[:200]}"
+            )
 
 
 def download_file(url: str, dest: Path):
@@ -185,9 +234,9 @@ def process_job(key: str):
         log.info("JOB %s ffmpeg start output=%s", key, output_file.name)
         result = subprocess.run(cmd, capture_output=True, text=True, check=False)
         if result.returncode != 0:
-            raise RuntimeError("ffmpeg_failed")
+            raise RuntimeError(result.stderr.strip() or "ffmpeg failed")
         if not output_file.exists() or output_file.stat().st_size == 0:
-            raise RuntimeError("output_artifact_missing")
+            raise RuntimeError("output artifact missing")
         log.info("JOB %s ffmpeg complete bytes=%s", key, output_file.stat().st_size)
 
         job["status"] = "completed"
@@ -384,4 +433,4 @@ def mark_complete(key: str):
         "artifact_ready": True,
         "artifact_endpoint": artifact_endpoint(key),
         "updated_at": job["updated_at"],
-        }
+    }
