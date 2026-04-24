@@ -15,27 +15,12 @@ import threading
 import urllib.request
 import urllib.parse
 
-import os
-import sys
-
 from upload_jobs import (
     UPLOAD_KIND,
     process_upload_job,
     reap_stale_uploads,
     register_upload_routes,
 )
-
-_REQUIRED_UPLOAD_ENV = [
-    "RUNNER_SHARED_SECRET",
-    "YOUTUBE_CLIENT_ID",
-    "YOUTUBE_CLIENT_SECRET",
-    "YOUTUBE_REFRESH_TOKEN",
-]
-_missing_upload_env = [k for k in _REQUIRED_UPLOAD_ENV if not os.environ.get(k)]
-if _missing_upload_env:
-    print(f"FATAL: upload patch missing env vars: {_missing_upload_env}", file=sys.stderr)
-    sys.exit(1)
-print(f"✓ upload env vars present: {sorted(_REQUIRED_UPLOAD_ENV)}")
 
 _INSTANCE_ID = uuid.uuid4().hex[:8]
 _BOOT_TIME = time.time()
