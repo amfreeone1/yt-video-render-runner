@@ -463,6 +463,13 @@ def register_upload_routes(app: FastAPI) -> None:
     ):
         _check_auth(x_runner_auth)
 
+        for _env_key in ["YOUTUBE_CLIENT_ID", "YOUTUBE_CLIENT_SECRET", "YOUTUBE_REFRESH_TOKEN"]:
+            if not os.environ.get(_env_key):
+                raise HTTPException(
+                    status_code=503,
+                    detail={"error_class": "CONFIG", "error_message": f"missing env var: {_env_key}"},
+                )
+
         if not idempotency_key or idempotency_key != body.upload_job_key:
             raise HTTPException(
                 status_code=400,
