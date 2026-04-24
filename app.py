@@ -15,6 +15,28 @@ import threading
 import urllib.request
 import urllib.parse
 
+import os
+import sys
+
+from upload_jobs import (
+    UPLOAD_KIND,
+    process_upload_job,
+    reap_stale_uploads,
+    register_upload_routes,
+)
+
+_REQUIRED_UPLOAD_ENV = [
+    "RUNNER_SHARED_SECRET",
+    "YOUTUBE_CLIENT_ID",
+    "YOUTUBE_CLIENT_SECRET",
+    "YOUTUBE_REFRESH_TOKEN",
+]
+_missing_upload_env = [k for k in _REQUIRED_UPLOAD_ENV if not os.environ.get(k)]
+if _missing_upload_env:
+    print(f"FATAL: upload patch missing env vars: {_missing_upload_env}", file=sys.stderr)
+    sys.exit(1)
+print(f"✓ upload env vars present: {sorted(_REQUIRED_UPLOAD_ENV)}")
+
 _INSTANCE_ID = uuid.uuid4().hex[:8]
 _BOOT_TIME = time.time()
 
@@ -142,6 +164,15 @@ def process_job(key: str):
     if not job:
         return
 
+    if job.get("kind") == UPLOAD_KIND:
+        process_upload_job(
+            key,
+            P=P, D=D, F=F,
+            save_job=save_job, delete_job=delete_job, load_job=load_job,
+            now=now, log=log,
+        )
+        return
+
     try:
         audio_file = AUD / f"{key}.mp3"
         output_file = OUT / f"{key}.mp4"
@@ -220,6 +251,11 @@ def process_job(key: str):
 def worker_loop():
     while True:
         try:
+            reap_stale_uploads(
+                P=P, F=F,
+                save_job=save_job, delete_job=delete_job, load_job=load_job,
+                now=now, log=log,
+            )
             for file in list(Q.glob("*.json")):
                 key = file.stem
                 job = load_job(Q, key)
@@ -385,3 +421,6 @@ def mark_complete(key: str):
         "artifact_endpoint": artifact_endpoint(key),
         "updated_at": job["updated_at"],
         }
+
+
+register_upload_routes(app)
