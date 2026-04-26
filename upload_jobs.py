@@ -59,7 +59,7 @@ def _ap_status(internal_status: str) -> str:
 
 class VideoSource(BaseModel):
     source: str = "drive"
-    drive_file_id: str
+    drive_file_id: str = ""
     url: Optional[str] = None
 
 class UploadMetadata(BaseModel):
@@ -476,8 +476,8 @@ def register_upload_routes(app: FastAPI) -> None:
                 detail={"error_class": "VALIDATION", "error_message": "Idempotency-Key header must match upload_job_key"},
             )
         _safe_key_check(body.upload_job_key)
-        if not body.video.drive_file_id:
-            raise HTTPException(status_code=400, detail={"error_class": "VALIDATION", "error_message": "video.drive_file_id is required"})
+        if body.video.source == "drive" and not body.video.drive_file_id:
+            raise HTTPException(status_code=400, detail={"error_class": "VALIDATION", "error_message": "video.drive_file_id is required when source=drive"})
         if not body.metadata.title:
             raise HTTPException(status_code=400, detail={"error_class": "VALIDATION", "error_message": "metadata.title is required"})
         if not body.metadata.category_id:
