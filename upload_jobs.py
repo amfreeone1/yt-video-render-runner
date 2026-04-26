@@ -59,7 +59,7 @@ def _ap_status(internal_status: str) -> str:
 
 class VideoSource(BaseModel):
     source: str = "drive"
-    drive_file_id: str
+    drive_file_id: str = ""
     url: Optional[str] = None
 
 class UploadMetadata(BaseModel):
@@ -343,11 +343,24 @@ def process_upload_job(
                 pass
 
         try:
-            video_path = _drive_fetch(job["video"]["drive_file_id"])
+            video_source = job.get("video", {})
+            if video_source.get("source") == "url" and video_source.get("url"):
+                import requests as _req
+                import tempfile as _tmp
+                fd, video_path = _tmp.mkstemp(suffix=".mp4")
+                os.close(fd)
+                with _req.get(video_source["url"], stream=True, timeout=300, allow_redirects=True) as _r:
+                    _r.raise_for_status()
+                    with open(video_path, "wb") as _f:
+                        for _chunk in _r.iter_content(chunk_size=8 * 1024 * 1024):
+                            if _chunk:
+                                _f.write(_chunk)
+            else:
+                video_path = _drive_fetch(job["video"]["drive_file_id"])
         except Exception as e:
             job["status"] = "failed"
             job["error_class"] = "VALIDATION"
-            job["error_message"] = f"drive_fetch_failed: {str(e)[:400]}"
+            job["error_message"] = f"video_fetch_failed: {str(e)[:400]}"
             return
 
         try:
@@ -476,8 +489,8 @@ def register_upload_routes(app: FastAPI) -> None:
                 detail={"error_class": "VALIDATION", "error_message": "Idempotency-Key header must match upload_job_key"},
             )
         _safe_key_check(body.upload_job_key)
-        if not body.video.drive_file_id:
-            raise HTTPException(status_code=400, detail={"error_class": "VALIDATION", "error_message": "video.drive_file_id is required"})
+        if body.video.source == "drive" and not body.video.drive_file_id:
+            raise HTTPException(status_code=400, detail={"error_class": "VALIDATION", "error_message": "video.drive_file_id is required when source=drive"})
         if not body.metadata.title:
             raise HTTPException(status_code=400, detail={"error_class": "VALIDATION", "error_message": "metadata.title is required"})
         if not body.metadata.category_id:
