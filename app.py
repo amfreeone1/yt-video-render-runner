@@ -293,6 +293,17 @@ def health():
 
 @app.post("/render-jobs")
 def submit_job(req: RenderRequest):
+    max_concurrent_renders = int(os.environ.get("MAX_CONCURRENT_RENDERS", "3"))
+    active_render_jobs = len(list(Q.glob("*.json")) + list(P.glob("*.json")))
+    if active_render_jobs >= max_concurrent_renders:
+        return JSONResponse(
+            status_code=429,
+            content={
+                "error_class": "CONCURRENCY",
+                "error_message": "Too many active render jobs",
+            },
+        )
+
     job = {
         "found": True,
         "render_job_key": req.render_job_key,
