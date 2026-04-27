@@ -1,5 +1,5 @@
-fastapi==0.136.1
-uvicorn==0.46.0
-requests==2.33.1
-google-api-python-client==2.194.0
-google-auth==2.49.2
+fastapi==0.115.12
+uvicorn==0.34.2
+requests==2.32.3
+google-api-python-client==2.169.0
+google-auth==2.40.1
