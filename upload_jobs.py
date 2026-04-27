@@ -107,9 +107,9 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 def _check_auth(x_runner_auth: Optional[str]) -> None:
-    expected = os.environ.get("RUNNER_SHARED_SECRET")
+    expected = os.environ.get("RUNNER_AUTH_TOKEN")
     if not expected:
-        raise RuntimeError("RUNNER_SHARED_SECRET env var not set")
+        raise RuntimeError("RUNNER_AUTH_TOKEN env var not set")
     if not x_runner_auth or x_runner_auth != expected:
         raise HTTPException(
             status_code=401,
