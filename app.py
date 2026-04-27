@@ -1,4 +1,5 @@
 import os
+import asyncio
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
 from pydantic import BaseModel
@@ -245,6 +246,41 @@ def process_job(key: str):
         job["updated_at"] = now()
         delete_job(P, key)
         save_job(F, key, job)
+
+
+async def reap_stale_jobs():
+    while True:
+        try:
+            timeout_seconds = int(os.environ.get("STALE_JOB_TIMEOUT_SECONDS", "3600"))
+            cutoff = time.time() - timeout_seconds
+            F.mkdir(parents=True, exist_ok=True)
+
+            for path in P.glob("*.json"):
+                try:
+                    if path.stat().st_mtime >= cutoff:
+                        continue
+
+                    key = path.stem
+                    job = load_job(P, key) or {}
+                    job["status"] = "failed"
+                    job["job_state_dir"] = "failed"
+                    job["error_class"] = "TIMEOUT"
+                    job["error_message"] = "Stale job reaped"
+                    job["updated_at"] = now()
+                    save_job(P, key, job)
+                    shutil.move(str(path), str(F / path.name))
+                    log.info("JOB %s reaped as stale", key)
+                except Exception as e:
+                    log.exception("stale job reaper error on %s: %s", path, e)
+        except Exception:
+            log.exception("stale job reaper loop error")
+
+        await asyncio.sleep(300)
+
+
+@app.on_event("startup")
+async def start_stale_job_reaper():
+    asyncio.create_task(reap_stale_jobs())
 
 
 def worker_loop():
