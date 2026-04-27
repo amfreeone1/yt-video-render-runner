@@ -1,5 +1,5 @@
 import os
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
 from pydantic import BaseModel
 from pathlib import Path
@@ -27,6 +27,20 @@ _BOOT_TIME = time.time()
 
 app = FastAPI()
 log = logging.getLogger("uvicorn.error")
+
+
+@app.middleware("http")
+async def require_x_runner_auth(request: Request, call_next):
+    if request.url.path.startswith(("/render-jobs", "/upload-jobs")):
+        expected = os.environ.get("RUNNER_AUTH_TOKEN")
+        supplied = request.headers.get("X-Runner-Auth")
+        if not expected or supplied != expected:
+            return JSONResponse(
+                status_code=401,
+                content={"error_class": "AUTH", "error_message": "Unauthorized"},
+            )
+    return await call_next(request)
+
 
 BASE = Path(__file__).resolve().parent
 JOBS = BASE / "jobs"
