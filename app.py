@@ -16,6 +16,7 @@ import threading
 import urllib.request
 import urllib.parse
 
+from assembly_jobs import register_assembly_routes
 from upload_jobs import (
     UPLOAD_KIND,
     process_upload_job,
@@ -470,3 +471,4 @@ def mark_complete(key: str):
 
 
 register_upload_routes(app)
+register_assembly_routes(app)
