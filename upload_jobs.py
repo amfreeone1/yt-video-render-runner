@@ -30,6 +30,7 @@ from google.oauth2.credentials import Credentials
 # ---------- Constants ----------
 
 UPLOAD_KIND = "upload"
+DEFAULT_RUNNER_PUBLIC_BASE_URL = "https://yt-video-render-runner.onrender.com"
 
 BASE = Path(__file__).resolve().parent
 JOBS = BASE / "jobs"
@@ -159,13 +160,26 @@ def _write_quota_lock(quota_resets_at: str) -> None:
         "written_at": _now_iso(),
     })
 
+def _render_artifact_url(render_job_key: str) -> str:
+    base_url = os.environ.get("RUNNER_PUBLIC_BASE_URL", DEFAULT_RUNNER_PUBLIC_BASE_URL).rstrip("/")
+    return f"{base_url}/render-jobs/{render_job_key}/artifact"
+
+def _effective_video_source(body: UploadJobRequest) -> dict:
+    video = body.video.model_dump()
+    render_job_key = body.render_job_key or ""
+    if render_job_key:
+        video["source"] = "url"
+        video["drive_file_id"] = ""
+        video["url"] = _render_artifact_url(render_job_key)
+    return video
+
 def _build_job_state(body: UploadJobRequest, status_str: str) -> dict:
     return {
         "kind": UPLOAD_KIND,
         "upload_job_key": body.upload_job_key,
         "content_id": body.content_id,
         "render_job_key": body.render_job_key or "",
-        "video": body.video.model_dump(),
+        "video": _effective_video_source(body),
         "metadata": body.metadata.model_dump(),
         "publish": body.publish.model_dump(),
         "status": status_str,
@@ -349,7 +363,11 @@ def process_upload_job(
                 import tempfile as _tmp
                 fd, video_path = _tmp.mkstemp(suffix=".mp4")
                 os.close(fd)
-                with _req.get(video_source["url"], stream=True, timeout=300, allow_redirects=True) as _r:
+                headers = {}
+                runner_auth_token = os.environ.get("RUNNER_AUTH_TOKEN")
+                if runner_auth_token:
+                    headers["X-Runner-Auth"] = runner_auth_token
+                with _req.get(video_source["url"], stream=True, timeout=300, allow_redirects=True, headers=headers) as _r:
                     _r.raise_for_status()
                     with open(video_path, "wb") as _f:
                         for _chunk in _r.iter_content(chunk_size=8 * 1024 * 1024):
@@ -489,8 +507,8 @@ def register_upload_routes(app: FastAPI) -> None:
                 detail={"error_class": "VALIDATION", "error_message": "Idempotency-Key header must match upload_job_key"},
             )
         _safe_key_check(body.upload_job_key)
-        if body.video.source == "drive" and not body.video.drive_file_id:
-            raise HTTPException(status_code=400, detail={"error_class": "VALIDATION", "error_message": "video.drive_file_id is required when source=drive"})
+        if body.video.source == "drive" and not body.video.drive_file_id and not body.render_job_key:
+            raise HTTPException(status_code=400, detail={"error_class": "VALIDATION", "error_message": "video.drive_file_id is required when source=drive and render_job_key is missing"})
         if not body.metadata.title:
             raise HTTPException(status_code=400, detail={"error_class": "VALIDATION", "error_message": "metadata.title is required"})
         if not body.metadata.category_id:
