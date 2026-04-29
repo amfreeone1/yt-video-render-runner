@@ -166,8 +166,8 @@ def _background_drive_upload(job_key: str, output_file):
         drive_file_id = upload_file_to_drive(output_file)
         job = load_job(D, job_key)
         if job:
-            job["drive_upload_status"] = "done"
             job["drive_file_id"] = drive_file_id
+            job["drive_upload_status"] = "done" if drive_file_id else "failed"
             job["updated_at"] = now()
             save_job(D, job_key, job)
         log.info("JOB %s Drive upload done: %s", job_key, drive_file_id)
