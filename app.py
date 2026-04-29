@@ -161,6 +161,25 @@ def download_file(url: str, dest: Path):
         shutil.copyfileobj(r, f)
 
 
+def _background_drive_upload(job_key: str, output_file):
+    try:
+        drive_file_id = upload_file_to_drive(output_file)
+        job = load_job(D, job_key)
+        if job:
+            job["drive_upload_status"] = "done"
+            job["drive_file_id"] = drive_file_id
+            job["updated_at"] = now()
+            save_job(D, job_key, job)
+        log.info("JOB %s Drive upload done: %s", job_key, drive_file_id)
+    except Exception as e:
+        log.warning("JOB %s Drive upload failed: %s", job_key, e)
+        job = load_job(D, job_key)
+        if job:
+            job["drive_upload_status"] = "failed"
+            job["updated_at"] = now()
+            save_job(D, job_key, job)
+
+
 def process_job(key: str):
     job = load_job(P, key)
     if not job:
@@ -225,24 +244,25 @@ def process_job(key: str):
             raise RuntimeError("output_artifact_missing")
         log.info("JOB %s ffmpeg complete bytes=%s", key, output_file.stat().st_size)
 
-        drive_file_id = upload_file_to_drive(output_file)
-        drive_upload_status = "done" if drive_file_id else "failed"
-        if not drive_file_id:
-            log.warning("JOB %s Drive upload did not return a file ID; render will still complete", key)
-
         job["status"] = "completed"
         job["job_state_dir"] = "done"
         job["video_url"] = ""
         job["output_file"] = output_file.name
         job["artifact_ready"] = True
         job["artifact_endpoint"] = artifact_endpoint(key)
-        job["drive_file_id"] = drive_file_id
-        job["drive_upload_status"] = drive_upload_status
+        job["drive_file_id"] = ""
+        job["drive_upload_status"] = "pending"
         job["error_message"] = ""
         job["updated_at"] = now()
         delete_job(P, key)
         save_job(D, key, job)
         log.info("JOB %s completed", key)
+
+        threading.Thread(
+            target=_background_drive_upload,
+            args=(key, output_file),
+            daemon=True,
+        ).start()
 
     except Exception as e:
         log.exception("JOB %s processing failed", key)
