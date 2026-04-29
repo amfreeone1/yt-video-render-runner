@@ -1,18 +1,7 @@
-# Rollback: upload video source artifact
+# Rollback: auto Drive upload on render complete
 
-This PR changes upload jobs so that a provided `render_job_key` resolves the upload video source to the runner artifact endpoint:
+## Rollback Plan
 
-```text
-https://yt-video-render-runner.onrender.com/render-jobs/{render_job_key}/artifact
-```
-
-## Rollback procedure
-
-Revert this PR.
-
-Expected rollback effect:
-
-- Upload jobs return to using the submitted `video` object directly.
-- `source="drive"` again requires `video.drive_file_id`.
-- The worker no longer rewrites upload video source from `render_job_key` to the render artifact endpoint.
-- URL downloads no longer add runner auth specifically for self-hosted artifact fetch unless preserved elsewhere.
+- Previous working version: 8b9c0722cb3bf158a49a8a8fa325f3014d2feacf
+- Rollback command: `git revert <this PR commit>`
+- Verification step: render job completes, artifact endpoint still returns 200, drive_file_id field present in job state (empty string if upload skipped)

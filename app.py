@@ -23,6 +23,7 @@ from upload_jobs import (
     reap_stale_uploads,
     register_upload_routes,
 )
+from utils.drive_upload import upload_file_to_drive
 
 _INSTANCE_ID = uuid.uuid4().hex[:8]
 _BOOT_TIME = time.time()
@@ -160,6 +161,25 @@ def download_file(url: str, dest: Path):
         shutil.copyfileobj(r, f)
 
 
+def _background_drive_upload(job_key: str, output_file):
+    try:
+        drive_file_id = upload_file_to_drive(output_file)
+        job = load_job(D, job_key)
+        if job:
+            job["drive_file_id"] = drive_file_id
+            job["drive_upload_status"] = "done" if drive_file_id else "failed"
+            job["updated_at"] = now()
+            save_job(D, job_key, job)
+        log.info("JOB %s Drive upload done: %s", job_key, drive_file_id)
+    except Exception as e:
+        log.warning("JOB %s Drive upload failed: %s", job_key, e)
+        job = load_job(D, job_key)
+        if job:
+            job["drive_upload_status"] = "failed"
+            job["updated_at"] = now()
+            save_job(D, job_key, job)
+
+
 def process_job(key: str):
     job = load_job(P, key)
     if not job:
@@ -180,6 +200,8 @@ def process_job(key: str):
 
         job["status"] = "processing"
         job["job_state_dir"] = "processing"
+        job["drive_file_id"] = job.get("drive_file_id", "")
+        job["drive_upload_status"] = job.get("drive_upload_status", "pending")
         job["updated_at"] = now()
         save_job(P, key, job)
 
@@ -228,11 +250,19 @@ def process_job(key: str):
         job["output_file"] = output_file.name
         job["artifact_ready"] = True
         job["artifact_endpoint"] = artifact_endpoint(key)
+        job["drive_file_id"] = ""
+        job["drive_upload_status"] = "pending"
         job["error_message"] = ""
         job["updated_at"] = now()
         delete_job(P, key)
         save_job(D, key, job)
         log.info("JOB %s completed", key)
+
+        threading.Thread(
+            target=_background_drive_upload,
+            args=(key, output_file),
+            daemon=True,
+        ).start()
 
     except Exception as e:
         log.exception("JOB %s processing failed", key)
@@ -243,6 +273,8 @@ def process_job(key: str):
         job["output_file"] = ""
         job["artifact_ready"] = False
         job["artifact_endpoint"] = ""
+        job["drive_file_id"] = job.get("drive_file_id", "")
+        job["drive_upload_status"] = job.get("drive_upload_status", "pending")
         job["error_message"] = str(e)
         job["updated_at"] = now()
         delete_job(P, key)
@@ -354,6 +386,8 @@ def submit_job(req: RenderRequest):
         "output_file": "",
         "artifact_ready": False,
         "artifact_endpoint": "",
+        "drive_file_id": "",
+        "drive_upload_status": "pending",
         "error_message": "",
         "received_at": now(),
         "updated_at": now(),
@@ -383,6 +417,8 @@ def get_job(key: str):
         "output_file": output_file,
         "artifact_ready": artifact_ready,
         "artifact_endpoint": artifact_endpoint(key) if artifact_ready else "",
+        "drive_file_id": job.get("drive_file_id", ""),
+        "drive_upload_status": job.get("drive_upload_status", "pending"),
         "error_message": job.get("error_message", ""),
         "received_at": job.get("received_at", ""),
         "updated_at": job.get("updated_at", job.get("received_at", "")),
