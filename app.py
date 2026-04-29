@@ -23,6 +23,7 @@ from upload_jobs import (
     reap_stale_uploads,
     register_upload_routes,
 )
+from utils.drive_upload import upload_file_to_drive
 
 _INSTANCE_ID = uuid.uuid4().hex[:8]
 _BOOT_TIME = time.time()
@@ -180,6 +181,8 @@ def process_job(key: str):
 
         job["status"] = "processing"
         job["job_state_dir"] = "processing"
+        job["drive_file_id"] = job.get("drive_file_id", "")
+        job["drive_upload_status"] = job.get("drive_upload_status", "pending")
         job["updated_at"] = now()
         save_job(P, key, job)
 
@@ -222,12 +225,19 @@ def process_job(key: str):
             raise RuntimeError("output_artifact_missing")
         log.info("JOB %s ffmpeg complete bytes=%s", key, output_file.stat().st_size)
 
+        drive_file_id = upload_file_to_drive(output_file)
+        drive_upload_status = "done" if drive_file_id else "failed"
+        if not drive_file_id:
+            log.warning("JOB %s Drive upload did not return a file ID; render will still complete", key)
+
         job["status"] = "completed"
         job["job_state_dir"] = "done"
         job["video_url"] = ""
         job["output_file"] = output_file.name
         job["artifact_ready"] = True
         job["artifact_endpoint"] = artifact_endpoint(key)
+        job["drive_file_id"] = drive_file_id
+        job["drive_upload_status"] = drive_upload_status
         job["error_message"] = ""
         job["updated_at"] = now()
         delete_job(P, key)
@@ -243,6 +253,8 @@ def process_job(key: str):
         job["output_file"] = ""
         job["artifact_ready"] = False
         job["artifact_endpoint"] = ""
+        job["drive_file_id"] = job.get("drive_file_id", "")
+        job["drive_upload_status"] = job.get("drive_upload_status", "pending")
         job["error_message"] = str(e)
         job["updated_at"] = now()
         delete_job(P, key)
@@ -354,6 +366,8 @@ def submit_job(req: RenderRequest):
         "output_file": "",
         "artifact_ready": False,
         "artifact_endpoint": "",
+        "drive_file_id": "",
+        "drive_upload_status": "pending",
         "error_message": "",
         "received_at": now(),
         "updated_at": now(),
@@ -383,6 +397,8 @@ def get_job(key: str):
         "output_file": output_file,
         "artifact_ready": artifact_ready,
         "artifact_endpoint": artifact_endpoint(key) if artifact_ready else "",
+        "drive_file_id": job.get("drive_file_id", ""),
+        "drive_upload_status": job.get("drive_upload_status", "pending"),
         "error_message": job.get("error_message", ""),
         "received_at": job.get("received_at", ""),
         "updated_at": job.get("updated_at", job.get("received_at", "")),
