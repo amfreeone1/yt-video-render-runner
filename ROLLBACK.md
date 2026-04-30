@@ -1,7 +1,7 @@
-# Rollback: auto Drive upload on render complete
+# Rollback: OAuth2 Drive upload auth
 
 ## Rollback Plan
 
-- Previous working version: 8b9c0722cb3bf158a49a8a8fa325f3014d2feacf
-- Rollback command: `git revert <this PR commit>`
-- Verification step: render job completes, artifact endpoint still returns 200, drive_file_id field present in job state (empty string if upload skipped)
+- Previous working version: b242ae5 (PR #16 merge commit)
+- Rollback command: `git revert c2fe874`
+- Verification step: drive_upload.py falls back to service account auth (will skip upload due to missing SA env vars, non-fatal)
