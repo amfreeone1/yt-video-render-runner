@@ -71,6 +71,19 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def parse_int_env(name, default, min_value=None):
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError(f"{name} must be an integer")
+    if min_value is not None and value < min_value:
+        raise ValueError(f"{name} must be >= {min_value}")
+    return value
+
+
 def artifact_endpoint(key: str) -> str:
     return f"/render-jobs/{key}/artifact"
 
@@ -284,7 +297,7 @@ def process_job(key: str):
 async def reap_stale_jobs():
     while True:
         try:
-            timeout_seconds = int(os.environ.get("STALE_JOB_TIMEOUT_SECONDS", "3600"))
+            timeout_seconds = parse_int_env("STALE_JOB_TIMEOUT_SECONDS", default=3600, min_value=60)
             cutoff = time.time() - timeout_seconds
             F.mkdir(parents=True, exist_ok=True)
 
