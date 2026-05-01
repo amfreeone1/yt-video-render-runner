@@ -19,6 +19,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional, List, Callable
 from fastapi import FastAPI, HTTPException, Header, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 import requests
@@ -140,14 +141,42 @@ def _read_json(path: Path) -> Optional[dict]:
     except Exception:
         return None
 
-def _find_upload_job(upload_job_key: str) -> Optional[tuple]:
-    """Return (folder, job_dict) for the upload job in any of Q/P/D/F. None if not found."""
+def _inspect_upload_job_state(upload_job_key: str) -> tuple:
+    """Return (lookup_state, folder, job_dict, reason) for upload job lookup."""
     for folder in (Q, P, D, F):
         path = folder / f"{upload_job_key}.json"
-        job = _read_json(path)
-        if job and job.get("kind") == UPLOAD_KIND:
-            return (folder, job)
+        try:
+            if not path.exists():
+                continue
+            try:
+                job = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                return ("state_missing", folder, None, "job_state_unreadable")
+            if job and job.get("kind") == UPLOAD_KIND:
+                return ("found", folder, job, "")
+            return ("state_missing", folder, job, "job_state_kind_mismatch")
+        except OSError:
+            return ("lookup_unavailable", folder, None, "job_state_lookup_failed")
+    return ("not_found", None, None, "upload_job_key_unknown")
+
+def _find_upload_job(upload_job_key: str) -> Optional[tuple]:
+    """Return (folder, job_dict) for the upload job in any of Q/P/D/F. None if not found."""
+    lookup_state, folder, job, _ = _inspect_upload_job_state(upload_job_key)
+    if lookup_state == "found":
+        return (folder, job)
     return None
+
+def _upload_lookup_error(upload_job_key: str, status_code: int, error_class: str, reason: str, retriable: bool) -> JSONResponse:
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "ok": False,
+            "job_id": upload_job_key,
+            "error_class": error_class,
+            "reason": reason,
+            "retriable": retriable,
+        },
+    )
 
 def _read_quota_lock() -> Optional[str]:
     data = _read_json(QUOTA_LOCK_FILE)
@@ -569,12 +598,16 @@ def register_upload_routes(app: FastAPI) -> None:
         _check_auth(x_runner_auth)
         _safe_key_check(upload_job_key)
 
-        result = _find_upload_job(upload_job_key)
-        if not result:
-            raise HTTPException(status_code=404, detail={"error_class": "NOT_FOUND", "error_message": "upload_job_key unknown"})
-        _, job = result
+        lookup_state, _, job, reason = _inspect_upload_job_state(upload_job_key)
+        if lookup_state == "lookup_unavailable":
+            return _upload_lookup_error(upload_job_key, 503, "STATE_LOOKUP_UNAVAILABLE", reason, True)
+        if lookup_state == "state_missing":
+            return _upload_lookup_error(upload_job_key, 410, "STATE_MISSING", reason, True)
+        if lookup_state == "not_found":
+            return _upload_lookup_error(upload_job_key, 404, "JOB_NOT_FOUND", reason, False)
 
         return {
+            "ok": True,
             "upload_job_key": job["upload_job_key"],
             "status": _ap_status(job.get("status", "")),
             "progress_pct": job.get("progress_pct", 0),
