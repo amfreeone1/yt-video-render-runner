@@ -1,7 +1,9 @@
-# Rollback: OAuth2 Drive upload auth
+# Rollback: PR #18 env parser and upload job lookup semantics
+
+Council decision reference: ACS-001
 
 ## Rollback Plan
 
-- Previous working version: b242ae5 (PR #16 merge commit)
-- Rollback command: `git revert c2fe874`
-- Verification step: drive_upload.py falls back to service account auth (will skip upload due to missing SA env vars, non-fatal)
+- Previous working version: c088e07 (PR #17 merge commit)
+- Rollback command: `git revert <PR #18 merge commit>`
+- Verification step: runner starts with valid `STALE_JOB_TIMEOUT_SECONDS`; `GET /upload-jobs/{upload_job_key}` returns existing upload job status or structured missing-state error.
