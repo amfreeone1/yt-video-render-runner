@@ -38,6 +38,9 @@ ASSEMBLE_STDERR = ASSEMBLE_JOBS / "stderr"
 
 PEXELS_VIDEO_SEARCH_URL = "https://api.pexels.com/videos/search"
 PIXABAY_MUSIC_SEARCH_URL = "https://pixabay.com/api/music/"
+ASSEMBLE_SEGMENT_WIDTH = 1280
+ASSEMBLE_SEGMENT_HEIGHT = 720
+ASSEMBLE_FFMPEG_THREADS = "1"
 
 DEFAULT_SECTION_QUERIES = {
     "HOOK": "kitchen electricity dark cinematic",
@@ -243,7 +246,7 @@ def _pexels_video_url(query: str) -> str:
     if not mp4_files:
         raise RuntimeError(f"no Pexels mp4 video found for query={query}")
 
-    mp4_files.sort(key=lambda item: abs((item.get("width") or 1920) - 1920))
+    mp4_files.sort(key=lambda item: abs((item.get("width") or ASSEMBLE_SEGMENT_WIDTH) - ASSEMBLE_SEGMENT_WIDTH))
     return mp4_files[0]["link"]
 
 
@@ -272,10 +275,22 @@ def _prepare_video_segment(input_path: Path, output_path: Path, duration: float,
         "fontcolor=white:fontsize=38:box=1:boxcolor=black@0.35:boxborderw=18:"
         f"textfile={_drawtext_textfile_value(textfile_path)}:x=80:y=h-150"
     )
-    vf = f"scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,{drawtext}"
+    vf = (
+        f"scale={ASSEMBLE_SEGMENT_WIDTH}:{ASSEMBLE_SEGMENT_HEIGHT}:force_original_aspect_ratio=increase,"
+        f"crop={ASSEMBLE_SEGMENT_WIDTH}:{ASSEMBLE_SEGMENT_HEIGHT},{drawtext}"
+    )
+    _log_event(
+        "SEGMENT_PREP_START",
+        job_key,
+        input_path=str(input_path),
+        output_path=str(output_path),
+        duration=f"{duration:.3f}",
+    )
     _run([
         "ffmpeg",
         "-y",
+        "-threads", ASSEMBLE_FFMPEG_THREADS,
+        "-filter_threads", ASSEMBLE_FFMPEG_THREADS,
         "-stream_loop", "-1",
         "-i", str(input_path),
         "-t", f"{duration:.3f}",
@@ -284,8 +299,15 @@ def _prepare_video_segment(input_path: Path, output_path: Path, duration: float,
         "-r", "30",
         "-c:v", "libx264",
         "-pix_fmt", "yuv420p",
+        "-threads", ASSEMBLE_FFMPEG_THREADS,
         str(output_path),
     ], job_key=job_key, event="prepare_video_segment")
+    _log_event(
+        "SEGMENT_PREP_DONE",
+        job_key,
+        output_path=str(output_path),
+        bytes=output_path.stat().st_size if output_path.exists() else None,
+    )
 
 
 def _concat_segments(segment_paths: List[Path], output_path: Path, work_dir: Path, *, job_key: str) -> None:
