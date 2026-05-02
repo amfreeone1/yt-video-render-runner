@@ -35,6 +35,7 @@ ASSEMBLE_DONE = ASSEMBLE_JOBS / "done"
 ASSEMBLE_FAILED = ASSEMBLE_JOBS / "failed"
 ASSEMBLE_PROCESSING = ASSEMBLE_JOBS / "processing"
 ASSEMBLE_STDERR = ASSEMBLE_JOBS / "stderr"
+ASSEMBLE_OUTPUTS = ASSEMBLE_JOBS / "outputs"
 
 PEXELS_VIDEO_SEARCH_URL = "https://api.pexels.com/videos/search"
 PIXABAY_MUSIC_SEARCH_URL = "https://pixabay.com/api/music/"
@@ -86,6 +87,16 @@ def _job_path(folder: Path, job_key: str) -> Path:
 
 def _stderr_path(job_key: str) -> Path:
     return ASSEMBLE_STDERR / f"{job_key}.stderr.log"
+
+
+def _output_path(job_key: str) -> Path:
+    return ASSEMBLE_OUTPUTS / f"{_safe_key(job_key)}.mp4"
+
+
+def _safe_log_path(path: Optional[Path]) -> Optional[str]:
+    if path is None:
+        return None
+    return _sanitize_external_error(str(path))
 
 
 def _append_stderr(job_key: Optional[str], stderr: str) -> Optional[Path]:
@@ -395,7 +406,8 @@ def _process_assemble_job(job_key: str, body: AssembleJobRequest) -> None:
         return
 
     _log_event("ASSEMBLY_PICKUP", job_key, content_id=body.content_id)
-    output_path = Path(f"/tmp/output_{_safe_key(body.content_id)}.mp4")
+    output_path = _output_path(job_key)
+    ASSEMBLE_OUTPUTS.mkdir(parents=True, exist_ok=True)
     try:
         with tempfile.TemporaryDirectory(prefix=f"assemble_{job_key}_") as tmp:
             work_dir = Path(tmp)
@@ -441,20 +453,24 @@ def _process_assemble_job(job_key: str, body: AssembleJobRequest) -> None:
 
             _log_event("FINAL_MUX_START", job_key, mode="with_music" if music_path else "voice_only")
             _mix_audio(concat_video_path, voice_path, music_path, output_path, voice_duration, job_key=job_key)
+            if not output_path.exists():
+                raise RuntimeError("final mux completed without output file")
             _log_event(
                 "FINAL_MUX_DONE",
                 job_key,
                 mode="with_music" if music_path else "voice_only",
-                output_path=str(output_path),
-                bytes=output_path.stat().st_size if output_path.exists() else None,
+                output_path=_safe_log_path(output_path),
+                bytes=output_path.stat().st_size,
             )
 
+        if not output_path.exists():
+            raise RuntimeError("final output file missing before completion state write")
         job["status"] = "done"
         job["output_path"] = str(output_path)
         job["output_video_url"] = f"/assemble-jobs/{job_key}/video"
         job["updated_at"] = _now()
         _save_job(ASSEMBLE_DONE, job_key, job)
-        _log_event("STATE_COMPLETE_WRITTEN", job_key, output_video_url=job["output_video_url"])
+        _log_event("STATE_COMPLETE_WRITTEN", job_key, output_video_url=job["output_video_url"], output_path=_safe_log_path(output_path), bytes=output_path.stat().st_size)
         _job_path(ASSEMBLE_PROCESSING, job_key).unlink(missing_ok=True)
     except Exception as exc:
         job["status"] = "failed"
@@ -477,7 +493,7 @@ def _process_assemble_job(job_key: str, body: AssembleJobRequest) -> None:
 
 
 def register_assembly_routes(app: FastAPI) -> None:
-    for folder in (ASSEMBLE_PROCESSING, ASSEMBLE_DONE, ASSEMBLE_FAILED, ASSEMBLE_STDERR):
+    for folder in (ASSEMBLE_PROCESSING, ASSEMBLE_DONE, ASSEMBLE_FAILED, ASSEMBLE_STDERR, ASSEMBLE_OUTPUTS):
         folder.mkdir(parents=True, exist_ok=True)
 
     @app.post("/assemble-job", status_code=202)
@@ -527,10 +543,12 @@ def register_assembly_routes(app: FastAPI) -> None:
                 stderr_tail = job.get("ffmpeg_stderr_tail")
             else:
                 stderr_tail = _stderr_tail(job_key) or []
+        output_path = Path(job["output_path"]) if job.get("output_path") else None
         return {
             "job_key": job["job_key"],
             "status": job["status"],
             "output_video_url": job.get("output_video_url"),
+            "output_exists": bool(output_path and output_path.exists()),
             "error_class": job.get("error_class"),
             "error_message": job.get("error_message"),
             "ffmpeg_returncode": job.get("ffmpeg_returncode"),
@@ -544,10 +562,15 @@ def register_assembly_routes(app: FastAPI) -> None:
         x_runner_auth: Optional[str] = Header(None, alias="X-Runner-Auth"),
     ):
         _check_auth(x_runner_auth)
+        _log_event("VIDEO_DOWNLOAD_START", job_key)
         job = _load_job(ASSEMBLE_DONE, job_key)
-        if not job or not job.get("output_path"):
+        if not job or job.get("status") != "done" or not job.get("output_path"):
+            _log_event("VIDEO_DOWNLOAD_NOT_FOUND", job_key, reason="job_not_complete_or_no_output_path", output_path=None)
             raise HTTPException(status_code=404, detail={"error_class": "NOT_FOUND", "error_message": "assemble video not found"})
         path = Path(job["output_path"])
         if not path.exists():
+            _log_event("VIDEO_DOWNLOAD_NOT_FOUND", job_key, reason="output_file_missing", output_path=_safe_log_path(path))
             raise HTTPException(status_code=404, detail={"error_class": "NOT_FOUND", "error_message": "assemble video file missing"})
+        size = path.stat().st_size
+        _log_event("VIDEO_DOWNLOAD_OK", job_key, output_path=_safe_log_path(path), bytes=size)
         return FileResponse(path, media_type="video/mp4", filename=path.name)
