@@ -278,6 +278,7 @@ class AssemblyJobsSmokeTests(unittest.TestCase):
 
         def fake_mix(_video_path, _voice_path, music_path, output_path, _duration, *, job_key):
             mix_calls.append(music_path)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_bytes(b"final")
 
         with patch.object(assembly_jobs, "_download_url", fake_download), \
