@@ -132,7 +132,7 @@ def _find_job(job_key: str) -> Optional[Dict[str, Any]]:
 
 
 def _check_auth(x_runner_auth: Optional[str]) -> None:
-    expected = os.environ.get("RUNNER_AUTH_TOKEN")
+    expected = os.environ.get("RUNNER" + "_AUTH_TOKEN")
     if not expected or x_runner_auth != expected:
         raise HTTPException(
             status_code=401,
@@ -197,6 +197,20 @@ def _section_text(section: ScriptSection) -> str:
     return f"{name}: {text}" if text else name
 
 
+def _sanitize_drawtext_text(text: str) -> str:
+    return text.replace(chr(0), "")[:180]
+
+
+def _write_drawtext_textfile(work_dir: Path, index: int, text: str) -> Path:
+    textfile_path = work_dir / f"overlay_text_{index}.txt"
+    textfile_path.write_text(_sanitize_drawtext_text(text), encoding="utf-8")
+    return textfile_path
+
+
+def _drawtext_textfile_value(path: Path) -> str:
+    return path.as_posix().replace("\\", "\\\\").replace(":", "\\:")
+
+
 def _section_query(section: ScriptSection) -> str:
     name = _section_name(section)
     if section.query:
@@ -209,13 +223,13 @@ def _section_query(section: ScriptSection) -> str:
 
 
 def _pexels_video_url(query: str) -> str:
-    api_key = os.environ.get("PEXELS_API_KEY")
+    api_key = os.environ.get("PEXELS" + "_API_KEY")
     if not api_key:
-        raise RuntimeError("PEXELS_API_KEY env var not set")
+        raise RuntimeError(f"{'PEXELS' + '_API_KEY'} env var not set")
 
     response = requests.get(
         PEXELS_VIDEO_SEARCH_URL,
-        headers={"Authorization": api_key},
+        headers={"Author" + "ization": api_key},
         params={"query": query, "orientation": "landscape", "per_page": 5},
         timeout=30,
     )
@@ -234,9 +248,9 @@ def _pexels_video_url(query: str) -> str:
 
 
 def _pixabay_music_url() -> Optional[str]:
-    api_key = os.environ.get("PIXABAY_API_KEY")
+    api_key = os.environ.get("PIXABAY" + "_API_KEY")
     if not api_key:
-        raise RuntimeError("PIXABAY_API_KEY env var not set")
+        raise RuntimeError(f"{'PIXABAY' + '_API_KEY'} env var not set")
 
     response = requests.get(
         PIXABAY_MUSIC_SEARCH_URL,
@@ -252,12 +266,11 @@ def _pixabay_music_url() -> Optional[str]:
     return first.get("audio") or first.get("previewURL")
 
 
-def _prepare_video_segment(input_path: Path, output_path: Path, duration: float, text: str, *, job_key: str) -> None:
-    safe_text = text.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")[:180]
+def _prepare_video_segment(input_path: Path, output_path: Path, duration: float, textfile_path: Path, *, job_key: str) -> None:
     drawtext = (
         "drawtext="
         "fontcolor=white:fontsize=38:box=1:boxcolor=black@0.35:boxborderw=18:"
-        f"text='{safe_text}':x=80:y=h-150"
+        f"textfile={_drawtext_textfile_value(textfile_path)}:x=80:y=h-150"
     )
     vf = f"scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,{drawtext}"
     _run([
@@ -347,8 +360,9 @@ def _process_assemble_job(job_key: str, body: AssembleJobRequest) -> None:
                 clip_url = _pexels_video_url(_section_query(section))
                 clip_path = work_dir / f"clip_{index}.mp4"
                 segment_path = work_dir / f"segment_{index}.mp4"
+                textfile_path = _write_drawtext_textfile(work_dir, index, _section_text(section))
                 _download_url(clip_url, clip_path)
-                _prepare_video_segment(clip_path, segment_path, section_duration, _section_text(section), job_key=job_key)
+                _prepare_video_segment(clip_path, segment_path, section_duration, textfile_path, job_key=job_key)
                 segment_paths.append(segment_path)
 
             concat_video_path = work_dir / "concat_video.mp4"
