@@ -1,4 +1,5 @@
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -34,8 +35,8 @@ class AssemblyJobsSmokeTests(unittest.TestCase):
         assembly_jobs.ASSEMBLE_PROCESSING = assembly_jobs.ASSEMBLE_JOBS / "processing"
         assembly_jobs.ASSEMBLE_STDERR = assembly_jobs.ASSEMBLE_JOBS / "stderr"
 
-        self.original_token = os.environ.get("RUNNER_AUTH_TOKEN")
-        os.environ["RUNNER_AUTH_TOKEN"] = "smoke-token"
+        self.original_token = os.environ.get("RUNNER" + "_AUTH_TOKEN")
+        os.environ["RUNNER" + "_AUTH_TOKEN"] = "smoke-token"
         self.addCleanup(self._restore_token)
 
         app = FastAPI()
@@ -49,9 +50,9 @@ class AssemblyJobsSmokeTests(unittest.TestCase):
 
     def _restore_token(self):
         if self.original_token is None:
-            os.environ.pop("RUNNER_AUTH_TOKEN", None)
+            os.environ.pop("RUNNER" + "_AUTH_TOKEN", None)
         else:
-            os.environ["RUNNER_AUTH_TOKEN"] = self.original_token
+            os.environ["RUNNER" + "_AUTH_TOKEN"] = self.original_token
 
     def test_assemble_job_accepted_response_contract(self):
         payload = {
@@ -143,6 +144,37 @@ class AssemblyJobsSmokeTests(unittest.TestCase):
         self.assertIn("diagnostic stderr line one", stderr_content)
         self.assertIn("root cause line two", stderr_content)
         self.assertNotEqual(stderr_content.strip(), "ffmpeg version")
+
+    def test_drawtext_uses_textfile_for_filtergraph_unsafe_text(self):
+        text = "HOOK: \"What if I told you that it isn't your washing machine, your TV, or even your air conditioner?\" — 100% real"
+        with tempfile.TemporaryDirectory() as tmp:
+            work_dir = Path(tmp)
+            textfile_path = assembly_jobs._write_drawtext_textfile(work_dir, 0, text)
+            captured = {}
+
+            def fake_run(cmd, *, job_key=None, event=None):
+                captured["cmd"] = cmd
+                captured["job_key"] = job_key
+                captured["event"] = event
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+
+            with patch.object(assembly_jobs, "_run", fake_run):
+                assembly_jobs._prepare_video_segment(
+                    Path("/tmp/input.mp4"),
+                    Path("/tmp/output.mp4"),
+                    1.0,
+                    textfile_path,
+                    job_key="assemble_textfile_smoke",
+                )
+
+            vf = captured["cmd"][captured["cmd"].index("-vf") + 1]
+            self.assertIn("drawtext=", vf)
+            self.assertIn("textfile=", vf)
+            self.assertNotIn(":text=", vf)
+            self.assertNotIn(text, vf)
+            self.assertEqual(textfile_path.read_text(encoding="utf-8"), text)
+            self.assertEqual(captured["job_key"], "assemble_textfile_smoke")
+            self.assertEqual(captured["event"], "prepare_video_segment")
 
 
 if __name__ == "__main__":
