@@ -143,6 +143,13 @@ def _check_auth(x_runner_auth: Optional[str]) -> None:
         )
 
 
+def _sanitize_external_error(value: Any) -> str:
+    message = str(value)
+    message = re.sub(r"([?&](?:key|token|access_token|signature|X-Goog-Signature)=)[^&\s]+", r"\1<redacted>", message, flags=re.IGNORECASE)
+    message = re.sub(r"(Authorization(?:%3A|:)?\s*(?:Bearer\s+)?)[A-Za-z0-9._~+/=-]+", r"\1<redacted>", message, flags=re.IGNORECASE)
+    return message
+
+
 def _build_audio_download_url(url: str) -> str:
     match = re.search(r"/d/([A-Za-z0-9_-]+)", url or "")
     if match:
@@ -250,23 +257,47 @@ def _pexels_video_url(query: str) -> str:
     return mp4_files[0]["link"]
 
 
-def _pixabay_music_url() -> Optional[str]:
+def _pixabay_music_url(*, job_key: Optional[str] = None) -> Optional[str]:
     api_key = os.environ.get("PIXABAY" + "_API_KEY")
     if not api_key:
-        raise RuntimeError(f"{'PIXABAY' + '_API_KEY'} env var not set")
+        if job_key:
+            _log_event("MUSIC_SKIPPED", job_key, reason="pixabay_api_key_missing")
+        return None
 
-    response = requests.get(
-        PIXABAY_MUSIC_SEARCH_URL,
-        params={"key": api_key, "q": "cinematic ambient", "per_page": 3, "safesearch": "true"},
-        timeout=30,
-    )
-    response.raise_for_status()
+    if job_key:
+        _log_event("MUSIC_FETCH_START", job_key, provider="pixabay")
+
+    try:
+        response = requests.get(
+            PIXABAY_MUSIC_SEARCH_URL,
+            params={"key": api_key, "q": "cinematic ambient", "per_page": 3, "safesearch": "true"},
+            timeout=30,
+        )
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        if job_key:
+            _log_event(
+                "MUSIC_FETCH_FAILED_NONFATAL",
+                job_key,
+                provider="pixabay",
+                error_message=_sanitize_external_error(exc),
+            )
+            _log_event("MUSIC_SKIPPED", job_key, reason="pixabay_fetch_failed")
+        return None
+
     hits = response.json().get("hits", [])
     if not hits:
+        if job_key:
+            _log_event("MUSIC_SKIPPED", job_key, reason="pixabay_no_hits")
         return None
 
     first = hits[0]
-    return first.get("audio") or first.get("previewURL")
+    music_url = first.get("audio") or first.get("previewURL")
+    if not music_url:
+        if job_key:
+            _log_event("MUSIC_SKIPPED", job_key, reason="pixabay_no_audio_url")
+        return None
+    return music_url
 
 
 def _prepare_video_segment(input_path: Path, output_path: Path, duration: float, textfile_path: Path, *, job_key: str) -> None:
@@ -391,25 +422,44 @@ def _process_assemble_job(job_key: str, body: AssembleJobRequest) -> None:
             _concat_segments(segment_paths, concat_video_path, work_dir, job_key=job_key)
 
             music_path: Optional[Path] = None
-            music_url = _pixabay_music_url()
+            music_url = _pixabay_music_url(job_key=job_key)
             if music_url:
-                music_path = work_dir / "music_audio"
-                _log_event("AUDIO_FETCH_START", job_key, source="music")
-                _download_url(music_url, music_path)
-                _log_event("AUDIO_FETCH_DONE", job_key, source="music", bytes=music_path.stat().st_size)
+                candidate_music_path = work_dir / "music_audio"
+                try:
+                    _log_event("AUDIO_FETCH_START", job_key, source="music")
+                    _download_url(music_url, candidate_music_path)
+                    _log_event("AUDIO_FETCH_DONE", job_key, source="music", bytes=candidate_music_path.stat().st_size)
+                    music_path = candidate_music_path
+                except requests.RequestException as exc:
+                    _log_event(
+                        "MUSIC_FETCH_FAILED_NONFATAL",
+                        job_key,
+                        provider="pixabay_media",
+                        error_message=_sanitize_external_error(exc),
+                    )
+                    _log_event("MUSIC_SKIPPED", job_key, reason="music_media_download_failed")
 
+            _log_event("FINAL_MUX_START", job_key, mode="with_music" if music_path else "voice_only")
             _mix_audio(concat_video_path, voice_path, music_path, output_path, voice_duration, job_key=job_key)
+            _log_event(
+                "FINAL_MUX_DONE",
+                job_key,
+                mode="with_music" if music_path else "voice_only",
+                output_path=str(output_path),
+                bytes=output_path.stat().st_size if output_path.exists() else None,
+            )
 
         job["status"] = "done"
         job["output_path"] = str(output_path)
         job["output_video_url"] = f"/assemble-jobs/{job_key}/video"
         job["updated_at"] = _now()
         _save_job(ASSEMBLE_DONE, job_key, job)
+        _log_event("STATE_COMPLETE_WRITTEN", job_key, output_video_url=job["output_video_url"])
         _job_path(ASSEMBLE_PROCESSING, job_key).unlink(missing_ok=True)
     except Exception as exc:
         job["status"] = "failed"
         job["error_class"] = "ASSEMBLY"
-        job["error_message"] = str(exc)[:500]
+        job["error_message"] = _sanitize_external_error(exc)[:500]
         if isinstance(exc, FFmpegCommandError):
             job["ffmpeg_returncode"] = exc.returncode
             if exc.stderr_path:
