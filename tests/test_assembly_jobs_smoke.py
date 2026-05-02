@@ -4,8 +4,9 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+import requests
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -37,7 +38,10 @@ class AssemblyJobsSmokeTests(unittest.TestCase):
 
         self.original_token = os.environ.get("RUNNER" + "_AUTH_TOKEN")
         os.environ["RUNNER" + "_AUTH_TOKEN"] = "smoke-token"
+        self.original_pixabay_key = os.environ.get("PIXABAY" + "_API_KEY")
+        os.environ["PIXABAY" + "_API_KEY"] = "pixabay-secret-key"
         self.addCleanup(self._restore_token)
+        self.addCleanup(self._restore_pixabay_key)
 
         app = FastAPI()
         assembly_jobs.register_assembly_routes(app)
@@ -53,6 +57,12 @@ class AssemblyJobsSmokeTests(unittest.TestCase):
             os.environ.pop("RUNNER" + "_AUTH_TOKEN", None)
         else:
             os.environ["RUNNER" + "_AUTH_TOKEN"] = self.original_token
+
+    def _restore_pixabay_key(self):
+        if self.original_pixabay_key is None:
+            os.environ.pop("PIXABAY" + "_API_KEY", None)
+        else:
+            os.environ["PIXABAY" + "_API_KEY"] = self.original_pixabay_key
 
     def test_assemble_job_accepted_response_contract(self):
         payload = {
@@ -209,6 +219,124 @@ class AssemblyJobsSmokeTests(unittest.TestCase):
             self.assertTrue(all(value == "1" for value in thread_values))
             self.assertEqual(captured["job_key"], "assemble_memory_smoke")
             self.assertEqual(captured["event"], "prepare_video_segment")
+
+    def test_pixabay_music_404_is_nonfatal_and_sanitized(self):
+        response = MagicMock()
+        response.raise_for_status.side_effect = requests.HTTPError(
+            "404 Client Error: Not Found for url: https://pixabay.com/api/music/?key=pixabay-secret-key&q=cinematic+ambient"
+        )
+        events = []
+
+        with patch.object(assembly_jobs.requests, "get", return_value=response), patch.object(assembly_jobs, "_log_event", lambda event, job_key, **fields: events.append((event, fields))):
+            music_url = assembly_jobs._pixabay_music_url(job_key="assemble_music_404")
+
+        self.assertIsNone(music_url)
+        event_names = [event for event, _fields in events]
+        self.assertIn("MUSIC_FETCH_START", event_names)
+        self.assertIn("MUSIC_FETCH_FAILED_NONFATAL", event_names)
+        self.assertIn("MUSIC_SKIPPED", event_names)
+        failed = [fields for event, fields in events if event == "MUSIC_FETCH_FAILED_NONFATAL"][0]
+        self.assertNotIn("pixabay-secret-key", failed["error_message"])
+        self.assertIn("key=<redacted>", failed["error_message"])
+
+    def test_assemble_continues_voice_only_when_music_unavailable(self):
+        job_key = "assemble_music_optional"
+        assembly_jobs._save_job(
+            assembly_jobs.ASSEMBLE_PROCESSING,
+            job_key,
+            {
+                "job_key": job_key,
+                "content_id": "YT-20260427-02-r1",
+                "status": "processing",
+                "output_video_url": None,
+                "output_path": None,
+                "error_class": None,
+                "error_message": None,
+                "ffmpeg_returncode": None,
+                "ffmpeg_stderr_path": None,
+                "ffmpeg_stderr_tail": None,
+                "received_at": "2026-05-02T00:00:00Z",
+                "updated_at": "2026-05-02T00:00:00Z",
+            },
+        )
+        body = assembly_jobs.AssembleJobRequest(
+            content_id="YT-20260427-02-r1",
+            audio_url="https://example.test/audio.mp3",
+            script_sections=[assembly_jobs.ScriptSection(section="HOOK", text="Smoke section")],
+        )
+        events = []
+        mix_calls = []
+
+        def fake_download(_url, dest, **_kwargs):
+            dest.write_bytes(b"media")
+
+        def fake_prepare(_input_path, output_path, _duration, _textfile_path, *, job_key):
+            output_path.write_bytes(b"segment")
+
+        def fake_concat(_segment_paths, output_path, _work_dir, *, job_key):
+            output_path.write_bytes(b"concat")
+
+        def fake_mix(_video_path, _voice_path, music_path, output_path, _duration, *, job_key):
+            mix_calls.append(music_path)
+            output_path.write_bytes(b"final")
+
+        with patch.object(assembly_jobs, "_download_url", fake_download), \
+            patch.object(assembly_jobs, "_probe_duration", return_value=5.0), \
+            patch.object(assembly_jobs, "_pexels_video_url", return_value="https://example.test/clip.mp4"), \
+            patch.object(assembly_jobs, "_prepare_video_segment", fake_prepare), \
+            patch.object(assembly_jobs, "_concat_segments", fake_concat), \
+            patch.object(assembly_jobs, "_pixabay_music_url", return_value=None), \
+            patch.object(assembly_jobs, "_mix_audio", fake_mix), \
+            patch.object(assembly_jobs, "_log_event", lambda event, job_key, **fields: events.append((event, fields))):
+            assembly_jobs._process_assemble_job(job_key, body)
+
+        done_job = assembly_jobs._load_job(assembly_jobs.ASSEMBLE_DONE, job_key)
+        failed_job = assembly_jobs._load_job(assembly_jobs.ASSEMBLE_FAILED, job_key)
+        self.assertIsNotNone(done_job)
+        self.assertIsNone(failed_job)
+        self.assertEqual(done_job["status"], "done")
+        self.assertEqual(mix_calls, [None])
+        event_names = [event for event, _fields in events]
+        self.assertIn("FINAL_MUX_START", event_names)
+        self.assertIn("FINAL_MUX_DONE", event_names)
+        self.assertIn("STATE_COMPLETE_WRITTEN", event_names)
+        mux_start = [fields for event, fields in events if event == "FINAL_MUX_START"][0]
+        self.assertEqual(mux_start["mode"], "voice_only")
+
+    def test_failed_error_message_sanitizes_external_secrets(self):
+        job_key = "assemble_sanitize_failure"
+        assembly_jobs._save_job(
+            assembly_jobs.ASSEMBLE_PROCESSING,
+            job_key,
+            {
+                "job_key": job_key,
+                "content_id": "YT-20260427-02-r1",
+                "status": "processing",
+                "output_video_url": None,
+                "output_path": None,
+                "error_class": None,
+                "error_message": None,
+                "ffmpeg_returncode": None,
+                "ffmpeg_stderr_path": None,
+                "ffmpeg_stderr_tail": None,
+                "received_at": "2026-05-02T00:00:00Z",
+                "updated_at": "2026-05-02T00:00:00Z",
+            },
+        )
+        body = assembly_jobs.AssembleJobRequest(
+            content_id="YT-20260427-02-r1",
+            audio_url="https://example.test/audio.mp3",
+            script_sections=[assembly_jobs.ScriptSection(section="HOOK", text="Smoke section")],
+        )
+
+        with patch.object(assembly_jobs, "_download_url", side_effect=requests.HTTPError("403 Client Error: Forbidden for url: https://example.test/audio.mp3?key=secret-token")):
+            assembly_jobs._process_assemble_job(job_key, body)
+
+        failed_job = assembly_jobs._load_job(assembly_jobs.ASSEMBLE_FAILED, job_key)
+        self.assertIsNotNone(failed_job)
+        self.assertEqual(failed_job["status"], "failed")
+        self.assertNotIn("secret-token", failed_job["error_message"])
+        self.assertIn("key=<redacted>", failed_job["error_message"])
 
 
 if __name__ == "__main__":
