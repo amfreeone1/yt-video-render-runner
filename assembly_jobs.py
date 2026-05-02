@@ -435,6 +435,12 @@ def register_assembly_routes(app: FastAPI) -> None:
         job = _find_job(job_key)
         if not job:
             raise HTTPException(status_code=404, detail={"error_class": "NOT_FOUND", "error_message": "assemble job not found"})
+        stderr_tail = None
+        if job.get("status") == "failed":
+            if "ffmpeg_stderr_tail" in job:
+                stderr_tail = job.get("ffmpeg_stderr_tail")
+            else:
+                stderr_tail = _stderr_tail(job_key) or []
         return {
             "job_key": job["job_key"],
             "status": job["status"],
@@ -442,7 +448,7 @@ def register_assembly_routes(app: FastAPI) -> None:
             "error_class": job.get("error_class"),
             "error_message": job.get("error_message"),
             "ffmpeg_returncode": job.get("ffmpeg_returncode"),
-            "ffmpeg_stderr_tail": job.get("ffmpeg_stderr_tail") or _stderr_tail(job_key),
+            "ffmpeg_stderr_tail": stderr_tail,
             "updated_at": job.get("updated_at"),
         }
 
