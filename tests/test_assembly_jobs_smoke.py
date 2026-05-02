@@ -176,6 +176,40 @@ class AssemblyJobsSmokeTests(unittest.TestCase):
             self.assertEqual(captured["job_key"], "assemble_textfile_smoke")
             self.assertEqual(captured["event"], "prepare_video_segment")
 
+    def test_prepare_video_segment_uses_720p_thread_limited_textfile_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_dir = Path(tmp)
+            textfile_path = assembly_jobs._write_drawtext_textfile(work_dir, 0, "HOOK: safe text")
+            captured = {}
+
+            def fake_run(cmd, *, job_key=None, event=None):
+                captured["cmd"] = cmd
+                captured["job_key"] = job_key
+                captured["event"] = event
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+
+            with patch.object(assembly_jobs, "_run", fake_run):
+                assembly_jobs._prepare_video_segment(
+                    Path("/tmp/input.mp4"),
+                    work_dir / "output.mp4",
+                    1.0,
+                    textfile_path,
+                    job_key="assemble_memory_smoke",
+                )
+
+            cmd = captured["cmd"]
+            vf = cmd[cmd.index("-vf") + 1]
+            self.assertIn("scale=1280:720:force_original_aspect_ratio=increase", vf)
+            self.assertIn("crop=1280:720", vf)
+            self.assertIn("textfile=", vf)
+            self.assertNotIn(":text=", vf)
+            self.assertIn("-threads", cmd)
+            thread_values = [cmd[index + 1] for index, value in enumerate(cmd[:-1]) if value == "-threads"]
+            self.assertTrue(thread_values)
+            self.assertTrue(all(value == "1" for value in thread_values))
+            self.assertEqual(captured["job_key"], "assemble_memory_smoke")
+            self.assertEqual(captured["event"], "prepare_video_segment")
+
 
 if __name__ == "__main__":
     unittest.main()
