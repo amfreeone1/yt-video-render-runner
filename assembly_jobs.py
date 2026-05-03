@@ -100,6 +100,10 @@ class ArtifactMirrorError(RuntimeError):
     pass
 
 
+class StateMirrorError(RuntimeError):
+    pass
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -181,16 +185,17 @@ def _find_job(job_key: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def _mirror_state(job_key: str, job: Dict[str, Any]) -> None:
-    """Best-effort mirror of job state to Drive. Non-fatal on failure."""
+def _mirror_state(job_key: str, job: Dict[str, Any]) -> str:
+    """Best-effort mirror of job state to Drive. Returns mirror id or empty string."""
     try:
-        state_store.write_state(job_key, job)
+        return state_store.write_state(job_key, job) or ""
     except Exception as exc:
         _log_event(
             "STATE_MIRROR_FAILED",
             job_key,
             error_message=_sanitize_external_error(exc),
         )
+        return ""
 
 
 def _persist_lifecycle(
@@ -198,8 +203,10 @@ def _persist_lifecycle(
     lifecycle_state: str,
     folder: Path,
     job: Dict[str, Any],
+    *,
+    require_mirror: bool = False,
     **extra: Any,
-) -> None:
+) -> str:
     """
     Single chokepoint for lifecycle transitions:
       1. Update lifecycle_state + updated_at + extras.
@@ -216,13 +223,16 @@ def _persist_lifecycle(
     for k, v in extra.items():
         job[k] = v
     _save_job(folder, job_key, job)
-    _mirror_state(job_key, job)
+    mirror_id = _mirror_state(job_key, job)
+    if require_mirror and state_store.is_enabled() and not mirror_id:
+        raise StateMirrorError(f"could not persist lifecycle state {lifecycle_state}")
     _log_event(
         f"LIFECYCLE_{lifecycle_state}",
         job_key,
         content_id=job.get("content_id"),
         status=job.get("status"),
     )
+    return mirror_id
 
 
 def list_active_persisted() -> List[Dict[str, Any]]:
@@ -661,7 +671,11 @@ def _process_assemble_job(job_key: str, body: AssembleJobRequest) -> None:
         job["output_video_url"] = f"/assemble-jobs/{job_key}/video"
         job["drive_file_id"] = drive_file_id
         job["updated_at"] = _now()
-        _save_job(ASSEMBLE_DONE, job_key, job)
+        _persist_lifecycle(
+            job_key, STATE_COMPLETE_WRITTEN, ASSEMBLE_DONE, job,
+            require_mirror=True,
+            drive_file_id=drive_file_id,
+        )
         _log_event(
             "STATE_COMPLETE_WRITTEN",
             job_key,
@@ -669,15 +683,14 @@ def _process_assemble_job(job_key: str, body: AssembleJobRequest) -> None:
             output_path=_safe_log_path(output_path),
             bytes=output_path.stat().st_size,
         )
-        _persist_lifecycle(
-            job_key, STATE_COMPLETE_WRITTEN, ASSEMBLE_DONE, job,
-            drive_file_id=drive_file_id,
-        )
         _job_path(ASSEMBLE_PROCESSING, job_key).unlink(missing_ok=True)
     except Exception as exc:
         job["status"] = "failed"
         if isinstance(exc, ArtifactMirrorError):
             job["error_class"] = "ARTIFACT_MIRROR"
+            job["error_message"] = _sanitize_external_error(exc)[:500]
+        elif isinstance(exc, StateMirrorError):
+            job["error_class"] = "STATE_MIRROR"
             job["error_message"] = _sanitize_external_error(exc)[:500]
         else:
             job["error_class"] = "ASSEMBLY"
@@ -700,6 +713,7 @@ def _process_assemble_job(job_key: str, body: AssembleJobRequest) -> None:
             error_class=job.get("error_class"),
             ffmpeg_returncode=job.get("ffmpeg_returncode"),
         )
+        _job_path(ASSEMBLE_DONE, job_key).unlink(missing_ok=True)
         _job_path(ASSEMBLE_PROCESSING, job_key).unlink(missing_ok=True)
 
 

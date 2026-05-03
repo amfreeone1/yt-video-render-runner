@@ -656,5 +656,50 @@ class AssemblyJobsSmokeTests(unittest.TestCase):
 
 
 
+    def test_terminal_state_mirror_failure_prevents_complete_when_artifact_uploaded(self):
+        job_key = "assemble_terminal_state_mirror_failure"
+        assembly_jobs._save_job(assembly_jobs.ASSEMBLE_PROCESSING, job_key, {"job_key": job_key, "content_id": "YT-20260427-02-r1", "status": "processing", "output_video_url": None, "output_path": None, "error_class": None, "error_message": None, "ffmpeg_returncode": None, "ffmpeg_stderr_path": None, "ffmpeg_stderr_tail": None, "received_at": "2026-05-02T00:00:00Z", "updated_at": "2026-05-02T00:00:00Z"})
+        body = assembly_jobs.AssembleJobRequest(content_id="YT-20260427-02-r1", audio_url="https://example.test/audio.mp3", script_sections=[assembly_jobs.ScriptSection(section="HOOK", title="Hook", text="Smoke section")])
+        events = []
+
+        def fake_download(_url, dest, **_kwargs):
+            dest.write_bytes(b"media")
+
+        def fake_prepare(_input_path, output_path, _duration, _textfile_path, *, job_key):
+            output_path.write_bytes(b"segment")
+
+        def fake_concat(_segment_paths, output_path, _work_dir, *, job_key):
+            output_path.write_bytes(b"concat")
+
+        def fake_mix(_video_path, _voice_path, _music_path, output_path, _duration, *, job_key):
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(b"final")
+
+        def fake_write_state(_job_key, payload):
+            if payload.get("lifecycle_state") == assembly_jobs.STATE_COMPLETE_WRITTEN:
+                return ""
+            return "state-id-ok"
+
+        with patch.object(assembly_jobs, "_download_url", fake_download), \
+             patch.object(assembly_jobs, "_probe_duration", return_value=5.0), \
+             patch.object(assembly_jobs, "_pexels_video_url", return_value="https://example.test/clip.mp4"), \
+             patch.object(assembly_jobs, "_prepare_video_segment", fake_prepare), \
+             patch.object(assembly_jobs, "_concat_segments", fake_concat), \
+             patch.object(assembly_jobs, "_pixabay_music_url", return_value=None), \
+             patch.object(assembly_jobs, "_mix_audio", fake_mix), \
+             patch.object(assembly_jobs.state_store, "is_enabled", lambda: True), \
+             patch.object(assembly_jobs.state_store, "upload_artifact", return_value="drive-artifact-id"), \
+             patch.object(assembly_jobs.state_store, "write_state", fake_write_state), \
+             patch.object(assembly_jobs, "_log_event", lambda event, job_key, **fields: events.append(event)):
+            assembly_jobs._process_assemble_job(job_key, body)
+
+        self.assertNotIn("STATE_COMPLETE_WRITTEN", events)
+        self.assertIsNone(assembly_jobs._load_job(assembly_jobs.ASSEMBLE_DONE, job_key))
+        failed_job = assembly_jobs._load_job(assembly_jobs.ASSEMBLE_FAILED, job_key)
+        self.assertIsNotNone(failed_job)
+        self.assertEqual(failed_job["status"], "failed")
+        self.assertEqual(failed_job["error_class"], "STATE_MIRROR")
+
+
 if __name__ == "__main__":
     unittest.main()
