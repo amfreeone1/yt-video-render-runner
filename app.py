@@ -16,7 +16,11 @@ import threading
 import urllib.request
 import urllib.parse
 
-from assembly_jobs import register_assembly_routes
+from assembly_jobs import (
+    register_assembly_routes,
+    startup_scan_recover_interrupted,
+    ASSEMBLE_PROCESSING,
+)
 from upload_jobs import (
     UPLOAD_KIND,
     process_upload_job,
@@ -69,6 +73,30 @@ class RenderRequest(BaseModel):
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+_ASSEMBLY_HEALTH_LOCK = threading.Lock()
+_ASSEMBLY_HEALTH_SUMMARY_DEFAULT = {
+    "scan_state": "not_started",
+    "persisted_non_terminal_count": 0,
+    "known_unreconciled_count": 0,
+    "known_interrupted_count": 0,
+    "local_processing_count": 0,
+    "reconciled": True,
+    "last_scan_started_at": None,
+    "last_scan_completed_at": None,
+    "last_scan_error": "",
+    "last_scan_summary": None,
+}
+_ASSEMBLY_HEALTH_SUMMARY = dict(_ASSEMBLY_HEALTH_SUMMARY_DEFAULT)
+
+
+def _reset_assembly_health_summary_for_tests():
+    """Test-only helper: restore the cached summary to its default values.
+    Not for production use."""
+    with _ASSEMBLY_HEALTH_LOCK:
+        _ASSEMBLY_HEALTH_SUMMARY.clear()
+        _ASSEMBLY_HEALTH_SUMMARY.update(_ASSEMBLY_HEALTH_SUMMARY_DEFAULT)
 
 
 def parse_int_env(name, default, min_value=None):
@@ -329,6 +357,23 @@ async def start_stale_job_reaper():
     asyncio.create_task(reap_stale_jobs())
 
 
+@app.on_event("startup")
+async def run_assembly_startup_scan():
+    """
+    Kick off Drive-backed assembly reconciliation after the app is ready.
+    The scan can perform network I/O and full persisted-state reads, so startup
+    must schedule it in the background instead of awaiting it on the readiness
+    path.
+    """
+    _schedule_assembly_startup_scan()
+
+
+def _schedule_assembly_startup_scan():
+    """Schedule the background scan task without awaiting it.
+    Indirection makes the non-await behavior easy to assert in tests."""
+    return asyncio.create_task(_run_assembly_startup_scan_background())
+
+
 def worker_loop():
     while True:
         try:
@@ -360,16 +405,110 @@ def worker_loop():
 threading.Thread(target=worker_loop, daemon=True).start()
 
 
+def _set_assembly_health_summary(**updates):
+    with _ASSEMBLY_HEALTH_LOCK:
+        _ASSEMBLY_HEALTH_SUMMARY.update(updates)
+
+
+def _assembly_local_processing_count() -> int:
+    try:
+        if ASSEMBLE_PROCESSING.exists():
+            return len(list(ASSEMBLE_PROCESSING.glob("*.json")))
+    except Exception:
+        log.exception("assembly local processing health check failed")
+    return 0
+
+
+def _assembly_health_summary():
+    """
+    Return the cached assembly persistence summary only.
+    Do not call Drive/list_all_states/list_active_persisted from /health.
+    """
+    with _ASSEMBLY_HEALTH_LOCK:
+        summary = dict(_ASSEMBLY_HEALTH_SUMMARY)
+
+    summary["local_processing_count"] = _assembly_local_processing_count()
+    if summary.get("persisted_non_terminal_count", 0) > 0:
+        summary["reconciled"] = False
+    if summary.get("known_unreconciled_count", 0) > 0:
+        summary["reconciled"] = False
+    return summary
+
+
+def _assembly_startup_scan_timeout_seconds() -> int:
+    return parse_int_env("ASSEMBLY_STARTUP_SCAN_TIMEOUT_SECONDS", default=300, min_value=1)
+
+
+async def _run_assembly_startup_scan_background():
+    _set_assembly_health_summary(
+        scan_state="running",
+        last_scan_started_at=now(),
+        last_scan_completed_at=None,
+        last_scan_error="",
+    )
+    loop = asyncio.get_running_loop()
+    scan_future = loop.run_in_executor(None, startup_scan_recover_interrupted)
+    try:
+        summary = await asyncio.wait_for(
+            scan_future,
+            timeout=_assembly_startup_scan_timeout_seconds(),
+        )
+    except asyncio.TimeoutError:
+        # The wait_for timeout cancels the awaitable but the underlying
+        # executor thread may still continue running its Drive I/O. We mark
+        # the cached health state as timed_out and keep readiness unblocked;
+        # we do not claim the underlying scan was cancelled.
+        _set_assembly_health_summary(
+            scan_state="timed_out",
+            reconciled=False,
+            last_scan_completed_at=now(),
+            last_scan_error="TimeoutError",
+        )
+        log.warning("assembly startup scan timed out; underlying executor work may continue")
+        return
+    except Exception as exc:
+        _set_assembly_health_summary(
+            scan_state="failed",
+            reconciled=False,
+            last_scan_completed_at=now(),
+            last_scan_error=type(exc).__name__,
+        )
+        log.exception("assembly startup scan failed")
+        return
+
+    # Successful scan. startup_scan_recover_interrupted() has already moved
+    # any non-terminal persisted jobs into the FAILED_RESTART_INTERRUPTED
+    # terminal state, so they are no longer unreconciled. We record the
+    # interrupted count separately and clear unreconciled / persisted-non-
+    # terminal counters so /health does not stay ok=false forever.
+    interrupted = int(summary.get("interrupted", 0) or 0)
+    _set_assembly_health_summary(
+        scan_state="complete",
+        persisted_non_terminal_count=0,
+        known_unreconciled_count=0,
+        known_interrupted_count=interrupted,
+        reconciled=True,
+        last_scan_completed_at=now(),
+        last_scan_error="",
+        last_scan_summary=summary,
+    )
+    log.info("assembly startup scan: %s", summary)
+
+
 @app.get("/health")
 def health():
+    render_active_jobs = len(list(Q.glob("*.json")) + list(P.glob("*.json")))
+    assembly = _assembly_health_summary()
+    assembly_unreconciled = not bool(assembly.get("reconciled", True))
     return {
-        "ok": True,
+        "ok": (not assembly_unreconciled),
         "service": "yt-video-render-runner",
         "ffmpeg_ready": shutil.which("ffmpeg") is not None,
         "time": now(),
         "instance_id": _INSTANCE_ID,
         "uptime_seconds": int(time.time() - _BOOT_TIME),
-        "active_jobs": len(list(Q.glob("*.json")) + list(P.glob("*.json"))),
+        "active_jobs": render_active_jobs,
+        "assembly": assembly,
     }
 
 
@@ -521,3 +660,4 @@ def mark_complete(key: str):
 
 register_upload_routes(app)
 register_assembly_routes(app)
+
