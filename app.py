@@ -19,7 +19,6 @@ import urllib.parse
 from assembly_jobs import (
     register_assembly_routes,
     startup_scan_recover_interrupted,
-    list_active_persisted,
     ASSEMBLE_PROCESSING,
 )
 from upload_jobs import (
@@ -74,6 +73,20 @@ class RenderRequest(BaseModel):
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+_ASSEMBLY_HEALTH_LOCK = threading.Lock()
+_ASSEMBLY_HEALTH_SUMMARY = {
+    "scan_state": "not_started",
+    "persisted_non_terminal_count": 0,
+    "known_unreconciled_count": 0,
+    "local_processing_count": 0,
+    "reconciled": True,
+    "last_scan_started_at": None,
+    "last_scan_completed_at": None,
+    "last_scan_error": "",
+    "last_scan_summary": None,
+}
 
 
 def parse_int_env(name, default, min_value=None):
@@ -337,18 +350,12 @@ async def start_stale_job_reaper():
 @app.on_event("startup")
 async def run_assembly_startup_scan():
     """
-    Scan persisted (Drive-mirrored) assembly states on boot. Any non-terminal
-    state is marked FAILED_RESTART_INTERRUPTED so the operator sees clearly
-    that the job did not survive the restart and no artifact was produced.
-    Synchronous network I/O is wrapped via run_in_executor so the event loop
-    is not blocked during boot.
+    Kick off Drive-backed assembly reconciliation after the app is ready.
+    The scan can perform network I/O and full persisted-state reads, so startup
+    must schedule it in the background instead of awaiting it on the readiness
+    path.
     """
-    loop = asyncio.get_event_loop()
-    try:
-        summary = await loop.run_in_executor(None, startup_scan_recover_interrupted)
-        log.info("assembly startup scan: %s", summary)
-    except Exception:
-        log.exception("assembly startup scan failed")
+    asyncio.create_task(_run_assembly_startup_scan_background())
 
 
 def worker_loop():
@@ -382,43 +389,80 @@ def worker_loop():
 threading.Thread(target=worker_loop, daemon=True).start()
 
 
-def _assembly_health_summary():
-    """
-    Cross-check persisted (Drive) non-terminal assembly states against the
-    local processing dir. Honest health: if persisted-non-terminal > 0 we
-    are NOT idle even when active_jobs (render queue) reports 0.
-    """
-    try:
-        persisted_active = list_active_persisted()
-    except Exception:
-        log.exception("assembly health summary failed")
-        persisted_active = []
+def _set_assembly_health_summary(**updates):
+    with _ASSEMBLY_HEALTH_LOCK:
+        _ASSEMBLY_HEALTH_SUMMARY.update(updates)
 
-    local_processing: list = []
+
+def _assembly_local_processing_count() -> int:
     try:
         if ASSEMBLE_PROCESSING.exists():
-            local_processing = [p.stem for p in ASSEMBLE_PROCESSING.glob("*.json")]
+            return len(list(ASSEMBLE_PROCESSING.glob("*.json")))
     except Exception:
-        local_processing = []
+        log.exception("assembly local processing health check failed")
+    return 0
 
-    return {
-        "persisted_non_terminal_count": len(persisted_active),
-        "local_processing_count": len(local_processing),
-        "reconciled": len(persisted_active) == len(local_processing),
-    }
+
+def _assembly_health_summary():
+    """
+    Return the cached assembly persistence summary only.
+    Do not call Drive/list_all_states/list_active_persisted from /health.
+    """
+    with _ASSEMBLY_HEALTH_LOCK:
+        summary = dict(_ASSEMBLY_HEALTH_SUMMARY)
+
+    summary["local_processing_count"] = _assembly_local_processing_count()
+    if summary.get("persisted_non_terminal_count", 0) > 0:
+        summary["reconciled"] = False
+    if summary.get("known_unreconciled_count", 0) > 0:
+        summary["reconciled"] = False
+    return summary
+
+
+def _assembly_startup_scan_timeout_seconds() -> int:
+    return parse_int_env("ASSEMBLY_STARTUP_SCAN_TIMEOUT_SECONDS", default=300, min_value=1)
+
+
+async def _run_assembly_startup_scan_background():
+    _set_assembly_health_summary(
+        scan_state="running",
+        last_scan_started_at=now(),
+        last_scan_completed_at=None,
+        last_scan_error="",
+    )
+    loop = asyncio.get_running_loop()
+    try:
+        scan_future = loop.run_in_executor(None, startup_scan_recover_interrupted)
+        summary = await asyncio.wait_for(
+            scan_future,
+            timeout=_assembly_startup_scan_timeout_seconds(),
+        )
+        interrupted = int(summary.get("interrupted", 0) or 0)
+        _set_assembly_health_summary(
+            scan_state="complete",
+            persisted_non_terminal_count=interrupted,
+            known_unreconciled_count=interrupted,
+            reconciled=(interrupted == 0),
+            last_scan_completed_at=now(),
+            last_scan_error="",
+            last_scan_summary=summary,
+        )
+        log.info("assembly startup scan: %s", summary)
+    except Exception as exc:
+        _set_assembly_health_summary(
+            scan_state="failed",
+            reconciled=False,
+            last_scan_completed_at=now(),
+            last_scan_error=type(exc).__name__,
+        )
+        log.exception("assembly startup scan failed")
 
 
 @app.get("/health")
 def health():
     render_active_jobs = len(list(Q.glob("*.json")) + list(P.glob("*.json")))
     assembly = _assembly_health_summary()
-    # `ok` must reflect EVERYTHING the runner is supposed to track. If
-    # assembly has persisted non-terminal jobs that are NOT visible in the
-    # local processing dir, we are unreconciled — surface that as not-ok.
-    assembly_unreconciled = (
-        assembly["persisted_non_terminal_count"] > 0
-        and not assembly["reconciled"]
-    )
+    assembly_unreconciled = not bool(assembly.get("reconciled", True))
     return {
         "ok": (not assembly_unreconciled),
         "service": "yt-video-render-runner",
