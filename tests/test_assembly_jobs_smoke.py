@@ -138,7 +138,7 @@ class AssemblyJobsSmokeTests(unittest.TestCase):
         self.assertNotEqual(stderr_content.strip(), "ffmpeg version")
 
     def test_drawtext_uses_textfile_for_filtergraph_unsafe_text(self):
-        text = "HOOK: \"Short title, isn't it?\" — 100% real"
+        text = "HOOK: \"Short title, isn't it?\" вЂ” 100% real"
         with tempfile.TemporaryDirectory() as tmp:
             work_dir = Path(tmp)
             textfile_path = assembly_jobs._write_drawtext_textfile(work_dir, 0, text)
@@ -368,9 +368,9 @@ class AssemblyJobsSmokeTests(unittest.TestCase):
         self.assertEqual(data["output_video_url"], f"/assemble-jobs/{job_key}/video")
         self.assertTrue(data["output_exists"])
 
-    # ──────────────────────────────────────────────────────────────────
+    # в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
     # Restart-safe persistence patch tests
-    # ──────────────────────────────────────────────────────────────────
+    # в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 
     def test_state_store_disabled_when_env_unset_is_noop(self):
         from utils import state_store
@@ -489,27 +489,27 @@ class AssemblyJobsSmokeTests(unittest.TestCase):
         keys = sorted(s["job_key"] for s in active)
         self.assertEqual(keys, ["a1", "a4"])
 
-    # ──────────────────────────────────────────────────────────────────
+    # в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
     # Blocker fixes
-    # ──────────────────────────────────────────────────────────────────
+    # в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 
     def test_state_store_requires_both_env_vars_for_enabled(self):
         from utils import state_store
-        # Only state folder set → still disabled.
+        # Only state folder set в†’ still disabled.
         os.environ["ASSEMBLY_STATE_DRIVE_FOLDER_ID"] = "state-folder-xyz"
         try:
             self.assertFalse(state_store.is_enabled())
         finally:
             del os.environ["ASSEMBLY_STATE_DRIVE_FOLDER_ID"]
 
-        # Only artifacts folder set → still disabled.
+        # Only artifacts folder set в†’ still disabled.
         os.environ["ASSEMBLY_ARTIFACTS_DRIVE_FOLDER_ID"] = "artifacts-folder-xyz"
         try:
             self.assertFalse(state_store.is_enabled())
         finally:
             del os.environ["ASSEMBLY_ARTIFACTS_DRIVE_FOLDER_ID"]
 
-        # Both set → enabled.
+        # Both set в†’ enabled.
         os.environ["ASSEMBLY_STATE_DRIVE_FOLDER_ID"] = "state-folder-xyz"
         os.environ["ASSEMBLY_ARTIFACTS_DRIVE_FOLDER_ID"] = "artifacts-folder-xyz"
         try:
@@ -639,14 +639,20 @@ class AssemblyJobsSmokeTests(unittest.TestCase):
         # Unauthenticated access must not leak job keys via this route.
         response = self.client.get("/assemble-jobs-health")
         self.assertEqual(response.status_code, 404)
-        # Authenticated still 404 — route does not exist anymore.
+        # Authenticated still 404 вЂ” route does not exist anymore.
         response = self.client.get("/assemble-jobs-health", headers=self.headers)
         self.assertEqual(response.status_code, 404)
 
     def test_health_does_not_expose_assembly_job_keys(self):
         import app as runner_app
-        with patch.object(runner_app, "list_active_persisted", lambda: [{"job_key": "secret-assembly-key"}]), \
-             patch.object(runner_app, "ASSEMBLE_PROCESSING", self.root / "no-processing"):
+        runner_app._reset_assembly_health_summary_for_tests()
+        self.addCleanup(runner_app._reset_assembly_health_summary_for_tests)
+        runner_app._set_assembly_health_summary(
+            persisted_non_terminal_count=1,
+            known_unreconciled_count=1,
+            reconciled=False,
+        )
+        with patch.object(runner_app, "ASSEMBLE_PROCESSING", self.root / "no-processing"):
             body = runner_app.health()
         self.assertIn("assembly", body)
         self.assertEqual(body["assembly"]["persisted_non_terminal_count"], 1)
@@ -701,5 +707,95 @@ class AssemblyJobsSmokeTests(unittest.TestCase):
         self.assertEqual(failed_job["error_class"], "STATE_MIRROR")
 
 
+class AssemblyHealthCacheTests(unittest.TestCase):
+    """Tests for the cached /health summary and background startup scan.
+    See PR #25 third fix: separate known_interrupted_count from
+    known_unreconciled_count; /health must remain cache-only."""
+
+    def setUp(self):
+        import app as app_module
+        self.app_module = app_module
+        # Ensure each test starts from default cached state.
+        app_module._reset_assembly_health_summary_for_tests()
+        self.addCleanup(app_module._reset_assembly_health_summary_for_tests)
+        self.client = TestClient(app_module.app)
+
+    def _set_summary(self, **updates):
+        self.app_module._set_assembly_health_summary(**updates)
+
+    # ── A) /health does not scan Drive on request ────────────────────
+    def test_health_endpoint_does_not_scan_drive(self):
+        import assembly_jobs
+
+        def boom(*args, **kwargs):
+            raise AssertionError("Drive scan must not be called from /health")
+
+        with patch.object(assembly_jobs, "list_active_persisted", boom), \
+             patch.object(assembly_jobs.state_store, "list_all_states", boom):
+            response = self.client.get("/health")
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertIn("assembly", body)
+
+    # ── B) startup schedules background scan and does not await it ──
+    def test_startup_schedules_background_scan_without_awaiting(self):
+        import asyncio as _asyncio
+
+        scheduled = []
+
+        def fake_schedule():
+            scheduled.append(True)
+            return None  # not a real task; we are not awaiting it
+
+        # Patch the scheduling indirection so the startup hook calls our fake.
+        # If the hook tried to await Drive reconciliation, this test would
+        # block (or call the real scan); since we replace _schedule_*, the
+        # hook returns immediately after calling fake_schedule().
+        with patch.object(self.app_module, "_schedule_assembly_startup_scan", fake_schedule):
+            _asyncio.run(self.app_module.run_assembly_startup_scan())
+
+        self.assertEqual(scheduled, [True])
+
+    # ── C) cached known_unreconciled_count makes /health ok=false ───
+    def test_cached_known_unreconciled_count_makes_health_not_ok(self):
+        self._set_summary(
+            scan_state="complete",
+            known_unreconciled_count=1,
+            persisted_non_terminal_count=0,
+            known_interrupted_count=0,
+            reconciled=False,
+        )
+        response = self.client.get("/health")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["assembly"]["known_unreconciled_count"], 1)
+
+    # ── D) successful scan with interrupted jobs: ok=true, count recorded ─
+    def test_successful_interrupted_recovery_records_count_and_health_ok(self):
+        import asyncio as _asyncio
+
+        fake_summary = {"scanned": 2, "interrupted": 1, "terminal": 1}
+
+        with patch.object(self.app_module, "startup_scan_recover_interrupted",
+                          return_value=fake_summary), \
+             patch.object(self.app_module, "_assembly_startup_scan_timeout_seconds",
+                          return_value=30):
+            _asyncio.run(self.app_module._run_assembly_startup_scan_background())
+
+        response = self.client.get("/health")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        assembly = body["assembly"]
+        self.assertTrue(body["ok"])
+        self.assertEqual(assembly["scan_state"], "complete")
+        self.assertEqual(assembly["known_interrupted_count"], 1)
+        self.assertEqual(assembly["persisted_non_terminal_count"], 0)
+        self.assertEqual(assembly["known_unreconciled_count"], 0)
+        self.assertTrue(assembly["reconciled"])
+
+
 if __name__ == "__main__":
     unittest.main()
+
