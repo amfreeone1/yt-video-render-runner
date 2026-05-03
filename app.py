@@ -16,7 +16,12 @@ import threading
 import urllib.request
 import urllib.parse
 
-from assembly_jobs import register_assembly_routes
+from assembly_jobs import (
+    register_assembly_routes,
+    startup_scan_recover_interrupted,
+    list_active_persisted,
+    ASSEMBLE_PROCESSING,
+)
 from upload_jobs import (
     UPLOAD_KIND,
     process_upload_job,
@@ -329,6 +334,23 @@ async def start_stale_job_reaper():
     asyncio.create_task(reap_stale_jobs())
 
 
+@app.on_event("startup")
+async def run_assembly_startup_scan():
+    """
+    Scan persisted (Drive-mirrored) assembly states on boot. Any non-terminal
+    state is marked FAILED_RESTART_INTERRUPTED so the operator sees clearly
+    that the job did not survive the restart and no artifact was produced.
+    Synchronous network I/O is wrapped via run_in_executor so the event loop
+    is not blocked during boot.
+    """
+    loop = asyncio.get_event_loop()
+    try:
+        summary = await loop.run_in_executor(None, startup_scan_recover_interrupted)
+        log.info("assembly startup scan: %s", summary)
+    except Exception:
+        log.exception("assembly startup scan failed")
+
+
 def worker_loop():
     while True:
         try:
@@ -360,16 +382,52 @@ def worker_loop():
 threading.Thread(target=worker_loop, daemon=True).start()
 
 
+def _assembly_health_summary():
+    """
+    Cross-check persisted (Drive) non-terminal assembly states against the
+    local processing dir. Honest health: if persisted-non-terminal > 0 we
+    are NOT idle even when active_jobs (render queue) reports 0.
+    """
+    try:
+        persisted_active = list_active_persisted()
+    except Exception:
+        log.exception("assembly health summary failed")
+        persisted_active = []
+
+    local_processing: list = []
+    try:
+        if ASSEMBLE_PROCESSING.exists():
+            local_processing = [p.stem for p in ASSEMBLE_PROCESSING.glob("*.json")]
+    except Exception:
+        local_processing = []
+
+    return {
+        "persisted_non_terminal_count": len(persisted_active),
+        "local_processing_count": len(local_processing),
+        "reconciled": len(persisted_active) == len(local_processing),
+    }
+
+
 @app.get("/health")
 def health():
+    render_active_jobs = len(list(Q.glob("*.json")) + list(P.glob("*.json")))
+    assembly = _assembly_health_summary()
+    # `ok` must reflect EVERYTHING the runner is supposed to track. If
+    # assembly has persisted non-terminal jobs that are NOT visible in the
+    # local processing dir, we are unreconciled — surface that as not-ok.
+    assembly_unreconciled = (
+        assembly["persisted_non_terminal_count"] > 0
+        and not assembly["reconciled"]
+    )
     return {
-        "ok": True,
+        "ok": (not assembly_unreconciled),
         "service": "yt-video-render-runner",
         "ffmpeg_ready": shutil.which("ffmpeg") is not None,
         "time": now(),
         "instance_id": _INSTANCE_ID,
         "uptime_seconds": int(time.time() - _BOOT_TIME),
-        "active_jobs": len(list(Q.glob("*.json")) + list(P.glob("*.json"))),
+        "active_jobs": render_active_jobs,
+        "assembly": assembly,
     }
 
 
