@@ -117,7 +117,7 @@ class AssemblyJobsSmokeTests(unittest.TestCase):
         self.assertNotEqual(stderr_content.strip(), "ffmpeg version")
 
     def test_drawtext_uses_textfile_for_filtergraph_unsafe_text(self):
-        text = "HOOK: \"What if I told you that it isn't your washing machine, your TV, or even your air conditioner?\" — 100% real"
+        text = "HOOK: \"Short title, isn't it?\" — 100% real"
         with tempfile.TemporaryDirectory() as tmp:
             work_dir = Path(tmp)
             textfile_path = assembly_jobs._write_drawtext_textfile(work_dir, 0, text)
@@ -140,10 +140,31 @@ class AssemblyJobsSmokeTests(unittest.TestCase):
             self.assertEqual(captured["job_key"], "assemble_textfile_smoke")
             self.assertEqual(captured["event"], "prepare_video_segment")
 
+    def test_section_overlay_uses_title_not_long_text(self):
+        long_text = "This is the long narration text that should be spoken by audio only and must not appear on screen."
+        section = assembly_jobs.ScriptSection(section="HOOK", title="Energy Drain", label="Ignored Label", text=long_text)
+        with tempfile.TemporaryDirectory() as tmp:
+            textfile_path = assembly_jobs._write_drawtext_textfile(Path(tmp), 0, assembly_jobs._section_text(section))
+            overlay = textfile_path.read_text(encoding="utf-8")
+        self.assertEqual(overlay, "Energy Drain")
+        self.assertNotIn(long_text, overlay)
+
+    def test_section_overlay_uses_label_before_section(self):
+        section = assembly_jobs.ScriptSection(section="HOOK", label="Main Problem", text="Long narration that should not be shown")
+        self.assertEqual(assembly_jobs._section_text(section), "Main Problem")
+
+    def test_section_overlay_is_capped_to_safe_short_length(self):
+        section = assembly_jobs.ScriptSection(title="A" * 80, text="Narration should not be used")
+        with tempfile.TemporaryDirectory() as tmp:
+            textfile_path = assembly_jobs._write_drawtext_textfile(Path(tmp), 0, assembly_jobs._section_text(section))
+            overlay = textfile_path.read_text(encoding="utf-8")
+        self.assertEqual(len(overlay), assembly_jobs.ASSEMBLE_OVERLAY_TEXT_LIMIT)
+        self.assertEqual(overlay, "A" * assembly_jobs.ASSEMBLE_OVERLAY_TEXT_LIMIT)
+
     def test_prepare_video_segment_uses_720p_thread_limited_textfile_command(self):
         with tempfile.TemporaryDirectory() as tmp:
             work_dir = Path(tmp)
-            textfile_path = assembly_jobs._write_drawtext_textfile(work_dir, 0, "HOOK: safe text")
+            textfile_path = assembly_jobs._write_drawtext_textfile(work_dir, 0, "HOOK")
             captured = {}
 
             def fake_run(cmd, *, job_key=None, event=None):
@@ -185,7 +206,7 @@ class AssemblyJobsSmokeTests(unittest.TestCase):
     def test_assemble_continues_voice_only_when_music_unavailable(self):
         job_key = "assemble_music_optional"
         assembly_jobs._save_job(assembly_jobs.ASSEMBLE_PROCESSING, job_key, {"job_key": job_key, "content_id": "YT-20260427-02-r1", "status": "processing", "output_video_url": None, "output_path": None, "error_class": None, "error_message": None, "ffmpeg_returncode": None, "ffmpeg_stderr_path": None, "ffmpeg_stderr_tail": None, "received_at": "2026-05-02T00:00:00Z", "updated_at": "2026-05-02T00:00:00Z"})
-        body = assembly_jobs.AssembleJobRequest(content_id="YT-20260427-02-r1", audio_url="https://example.test/audio.mp3", script_sections=[assembly_jobs.ScriptSection(section="HOOK", text="Smoke section")])
+        body = assembly_jobs.AssembleJobRequest(content_id="YT-20260427-02-r1", audio_url="https://example.test/audio.mp3", script_sections=[assembly_jobs.ScriptSection(section="HOOK", title="Hook", text="Long narration should not be used as overlay")])
         events = []
         mix_calls = []
 
@@ -264,7 +285,7 @@ class AssemblyJobsSmokeTests(unittest.TestCase):
     def test_state_complete_written_after_output_file_exists(self):
         job_key = "assemble_state_after_output"
         assembly_jobs._save_job(assembly_jobs.ASSEMBLE_PROCESSING, job_key, {"job_key": job_key, "content_id": "YT-20260427-02-r1", "status": "processing", "output_video_url": None, "output_path": None, "error_class": None, "error_message": None, "ffmpeg_returncode": None, "ffmpeg_stderr_path": None, "ffmpeg_stderr_tail": None, "received_at": "2026-05-02T00:00:00Z", "updated_at": "2026-05-02T00:00:00Z"})
-        body = assembly_jobs.AssembleJobRequest(content_id="YT-20260427-02-r1", audio_url="https://example.test/audio.mp3", script_sections=[assembly_jobs.ScriptSection(section="HOOK", text="Smoke section")])
+        body = assembly_jobs.AssembleJobRequest(content_id="YT-20260427-02-r1", audio_url="https://example.test/audio.mp3", script_sections=[assembly_jobs.ScriptSection(section="HOOK", title="Hook", text="Smoke section")])
         events = []
 
         def fake_download(_url, dest, **_kwargs):
@@ -293,7 +314,7 @@ class AssemblyJobsSmokeTests(unittest.TestCase):
     def test_state_complete_not_written_when_output_file_missing(self):
         job_key = "assemble_missing_after_mux"
         assembly_jobs._save_job(assembly_jobs.ASSEMBLE_PROCESSING, job_key, {"job_key": job_key, "content_id": "YT-20260427-02-r1", "status": "processing", "output_video_url": None, "output_path": None, "error_class": None, "error_message": None, "ffmpeg_returncode": None, "ffmpeg_stderr_path": None, "ffmpeg_stderr_tail": None, "received_at": "2026-05-02T00:00:00Z", "updated_at": "2026-05-02T00:00:00Z"})
-        body = assembly_jobs.AssembleJobRequest(content_id="YT-20260427-02-r1", audio_url="https://example.test/audio.mp3", script_sections=[assembly_jobs.ScriptSection(section="HOOK", text="Smoke section")])
+        body = assembly_jobs.AssembleJobRequest(content_id="YT-20260427-02-r1", audio_url="https://example.test/audio.mp3", script_sections=[assembly_jobs.ScriptSection(section="HOOK", title="Hook", text="Smoke section")])
         events = []
 
         def fake_download(_url, dest, **_kwargs):

@@ -42,6 +42,7 @@ PIXABAY_MUSIC_SEARCH_URL = "https://pixabay.com/api/music/"
 ASSEMBLE_SEGMENT_WIDTH = 1280
 ASSEMBLE_SEGMENT_HEIGHT = 720
 ASSEMBLE_FFMPEG_THREADS = "1"
+ASSEMBLE_OVERLAY_TEXT_LIMIT = 60
 
 DEFAULT_SECTION_QUERIES = {
     "HOOK": "kitchen electricity dark cinematic",
@@ -212,14 +213,21 @@ def _section_name(section: ScriptSection) -> str:
     return (section.section or section.label or section.title or "SECTION").strip().upper()
 
 
+def _section_overlay_text(section: ScriptSection) -> str:
+    for value in (section.title, section.label, section.section):
+        text = (value or "").strip()
+        if text:
+            return text
+    return "SECTION"
+
+
 def _section_text(section: ScriptSection) -> str:
-    name = _section_name(section)
-    text = section.text.strip()
-    return f"{name}: {text}" if text else name
+    return _section_overlay_text(section)
 
 
 def _sanitize_drawtext_text(text: str) -> str:
-    return text.replace(chr(0), "")[:180]
+    text = re.sub(r"\s+", " ", text.replace(chr(0), "")).strip()
+    return text[:ASSEMBLE_OVERLAY_TEXT_LIMIT]
 
 
 def _write_drawtext_textfile(work_dir: Path, index: int, text: str) -> Path:
