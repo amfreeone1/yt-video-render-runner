@@ -15,6 +15,14 @@ import subprocess
 import threading
 import urllib.request
 import urllib.parse
+import base64
+import binascii
+from io import BytesIO
+
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request as GoogleAuthRequest
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
 
 from assembly_jobs import (
     register_assembly_routes,
@@ -34,6 +42,13 @@ _BOOT_TIME = time.time()
 
 app = FastAPI()
 log = logging.getLogger("uvicorn.error")
+
+MCP_SERVER_NAME = "hafis-drive-raw-upload-mcp"
+MCP_SERVER_VERSION = "0.1.0"
+MCP_PROTOCOL_VERSION = "2024-11-05"
+MCP_TOOL_NAME = "upload_image_to_drive_and_share"
+DEFAULT_MCP_IMAGE_FILENAME = "hafiz_ai_concept_instagram.jpg"
+GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file"
 
 
 @app.middleware("http")
@@ -219,6 +234,267 @@ def _background_drive_upload(job_key: str, output_file):
             job["drive_upload_status"] = "failed"
             job["updated_at"] = now()
             save_job(D, job_key, job)
+
+
+def _safe_drive_filename(filename) -> str:
+    name = (filename or DEFAULT_MCP_IMAGE_FILENAME).strip()
+    name = os.path.basename(name.replace("\x00", ""))
+    return name or DEFAULT_MCP_IMAGE_FILENAME
+
+
+def _validate_mcp_jpeg(image_bytes: bytes):
+    if not image_bytes:
+        raise HTTPException(status_code=400, detail="empty image/jpeg payload")
+    if not image_bytes.startswith(b"\xff\xd8"):
+        raise HTTPException(status_code=415, detail="payload is not a JPEG file")
+
+
+def _google_drive_service():
+    missing = [
+        name
+        for name in (
+            "GOOGLE_CLIENT_ID",
+            "GOOGLE_CLIENT_SECRET",
+            "GOOGLE_REFRESH_TOKEN",
+        )
+        if not os.getenv(name)
+    ]
+    if missing:
+        raise HTTPException(
+            status_code=500,
+            detail=f"missing Google Drive OAuth env vars: {', '.join(missing)}",
+        )
+
+    credentials = Credentials(
+        token=None,
+        refresh_token=os.environ["GOOGLE_REFRESH_TOKEN"],
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=os.environ["GOOGLE_CLIENT_ID"],
+        client_secret=os.environ["GOOGLE_CLIENT_SECRET"],
+        scopes=[GOOGLE_DRIVE_SCOPE],
+    )
+    credentials.refresh(GoogleAuthRequest())
+    return build("drive", "v3", credentials=credentials, cache_discovery=False)
+
+
+def _upload_image_to_drive_and_share(image_bytes: bytes, filename=None) -> dict:
+    _validate_mcp_jpeg(image_bytes)
+    safe_name = _safe_drive_filename(filename)
+    metadata = {
+        "name": safe_name,
+        "mimeType": "image/jpeg",
+    }
+    folder_id = os.getenv("GOOGLE_DRIVE_FOLDER_ID")
+    if folder_id:
+        metadata["parents"] = [folder_id]
+
+    media = MediaIoBaseUpload(
+        BytesIO(image_bytes),
+        mimetype="image/jpeg",
+        resumable=False,
+    )
+
+    try:
+        service = _google_drive_service()
+        created = service.files().create(
+            body=metadata,
+            media_body=media,
+            fields="id,name,mimeType,webViewLink",
+        ).execute()
+        service.permissions().create(
+            fileId=created["id"],
+            body={"type": "anyone", "role": "reader"},
+            fields="id",
+        ).execute()
+        shared = service.files().get(
+            fileId=created["id"],
+            fields="id,name,mimeType,webViewLink",
+        ).execute()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.exception("MCP Drive raw image upload failed")
+        raise HTTPException(status_code=502, detail=f"drive upload failed: {type(exc).__name__}")
+
+    return {
+        "file_id": shared["id"],
+        "name": shared.get("name", safe_name),
+        "mime_type": shared.get("mimeType", "image/jpeg"),
+        "webViewLink": shared.get("webViewLink", ""),
+    }
+
+
+def _mcp_tool_definition() -> dict:
+    return {
+        "name": MCP_TOOL_NAME,
+        "description": (
+            "Upload a JPEG image to Google Drive as a raw image file, make it readable "
+            "by anyone with the link, and return the public webViewLink. This is a write "
+            "action and should be confirmed by the MCP client before execution. It does "
+            "not create Google Docs, Slides, or Sheets and does not publish to social media."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "image_base64": {
+                    "type": "string",
+                    "description": (
+                        "Base64-encoded raw image/jpeg bytes. For direct raw upload, "
+                        "POST image/jpeg bytes to /mcp?filename=<name>."
+                    ),
+                },
+                "filename": {
+                    "type": "string",
+                    "description": "Drive file name. Defaults to hafiz_ai_concept_instagram.jpg.",
+                    "default": DEFAULT_MCP_IMAGE_FILENAME,
+                },
+            },
+            "required": ["image_base64"],
+            "additionalProperties": False,
+        },
+        "annotations": {
+            "title": "Upload JPEG to Drive and share",
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": False,
+            "openWorldHint": True,
+        },
+    }
+
+
+def _mcp_response(request_id, result: dict):
+    return {"jsonrpc": "2.0", "id": request_id, "result": result}
+
+
+def _mcp_error(request_id, code: int, message: str, data=None):
+    error = {"code": code, "message": message}
+    if data is not None:
+        error["data"] = data
+    return {"jsonrpc": "2.0", "id": request_id, "error": error}
+
+
+def _decode_mcp_image_base64(value: str) -> bytes:
+    if not value:
+        raise ValueError("image_base64 is required")
+    if "," in value and value.strip().lower().startswith("data:"):
+        value = value.split(",", 1)[1]
+    try:
+        return base64.b64decode(value, validate=True)
+    except binascii.Error as exc:
+        raise ValueError("image_base64 must be valid base64") from exc
+
+
+def _handle_mcp_jsonrpc_message(message: dict):
+    request_id = message.get("id")
+    method = message.get("method")
+
+    if method == "initialize":
+        client_protocol = (message.get("params") or {}).get("protocolVersion")
+        return _mcp_response(
+            request_id,
+            {
+                "protocolVersion": client_protocol or MCP_PROTOCOL_VERSION,
+                "capabilities": {"tools": {}},
+                "serverInfo": {
+                    "name": MCP_SERVER_NAME,
+                    "version": MCP_SERVER_VERSION,
+                },
+            },
+        )
+
+    if method == "notifications/initialized":
+        return None
+
+    if method == "ping":
+        return _mcp_response(request_id, {})
+
+    if method == "tools/list":
+        return _mcp_response(request_id, {"tools": [_mcp_tool_definition()]})
+
+    if method == "tools/call":
+        params = message.get("params") or {}
+        if params.get("name") != MCP_TOOL_NAME:
+            return _mcp_error(request_id, -32602, f"unsupported tool: {params.get('name')}")
+
+        arguments = params.get("arguments") or {}
+        try:
+            image_bytes = _decode_mcp_image_base64(arguments.get("image_base64", ""))
+            upload = _upload_image_to_drive_and_share(
+                image_bytes=image_bytes,
+                filename=arguments.get("filename"),
+            )
+        except HTTPException as exc:
+            return _mcp_error(request_id, exc.status_code, str(exc.detail))
+        except ValueError as exc:
+            return _mcp_error(request_id, -32602, str(exc))
+
+        text = json.dumps(upload, ensure_ascii=False)
+        return _mcp_response(
+            request_id,
+            {
+                "content": [{"type": "text", "text": text}],
+                "structuredContent": upload,
+                "isError": False,
+            },
+        )
+
+    return _mcp_error(request_id, -32601, f"method not found: {method}")
+
+
+@app.get("/mcp")
+def mcp_info():
+    return {
+        "ok": True,
+        "server": MCP_SERVER_NAME,
+        "version": MCP_SERVER_VERSION,
+        "transport": "http",
+        "endpoint": "/mcp",
+        "tools": [MCP_TOOL_NAME],
+    }
+
+
+@app.post("/mcp")
+async def mcp_endpoint(request: Request):
+    content_type = request.headers.get("content-type", "").lower()
+    if content_type.startswith("image/jpeg"):
+        image_bytes = await request.body()
+        upload = _upload_image_to_drive_and_share(
+            image_bytes=image_bytes,
+            filename=request.query_params.get("filename") or request.headers.get("X-HAFIS-Filename"),
+        )
+        return {
+            "ok": True,
+            "tool": MCP_TOOL_NAME,
+            "result": upload,
+        }
+
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(
+            status_code=400,
+            detail="expected MCP JSON-RPC payload or raw image/jpeg body",
+        )
+
+    if isinstance(payload, list):
+        responses = [
+            response
+            for item in payload
+            if isinstance(item, dict)
+            for response in [_handle_mcp_jsonrpc_message(item)]
+            if response is not None
+        ]
+        if not responses:
+            return JSONResponse(status_code=202, content={})
+        return responses
+
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="MCP JSON-RPC payload must be an object or batch")
+
+    response = _handle_mcp_jsonrpc_message(payload)
+    if response is None:
+        return JSONResponse(status_code=202, content={})
+    return response
 
 
 def process_job(key: str):
@@ -660,4 +936,3 @@ def mark_complete(key: str):
 
 register_upload_routes(app)
 register_assembly_routes(app)
-
