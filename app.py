@@ -28,7 +28,7 @@ from upload_jobs import (
     register_upload_routes,
 )
 from utils.drive_upload import upload_file_to_drive
-
+from youtube_diagnostics import register_youtube_diagnostic_routes
 _INSTANCE_ID = uuid.uuid4().hex[:8]
 _BOOT_TIME = time.time()
 
@@ -660,4 +660,4 @@ def mark_complete(key: str):
 
 register_upload_routes(app)
 register_assembly_routes(app)
-
+register_youtube_diagnostic_routes(app)
